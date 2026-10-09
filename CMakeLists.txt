@@ -23,18 +23,28 @@ find_package(Qt6 6.2 REQUIRED COMPONENTS Widgets)
 
 qt_standard_project_setup()
 
-add_executable(peek src/main.cpp)
+add_executable(peek
+    src/main.cpp
+    src/preview_request.cpp
+    src/preview_request.h
+    src/preview_window.cpp
+    src/preview_window.h
+)
 
 target_compile_definitions(peek PRIVATE PEEK_VERSION="${PROJECT_VERSION}")
 target_link_libraries(peek PRIVATE Qt6::Widgets)
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(peek PRIVATE -Wall -Wextra -Wpedantic)
-    if(PEEK_ENABLE_SANITIZERS)
-        target_compile_options(peek PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-        target_link_options(peek PRIVATE -fsanitize=address,undefined)
+function(peek_configure_target target)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+        if(PEEK_ENABLE_SANITIZERS)
+            target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+        endif()
     endif()
-endif()
+endfunction()
+
+peek_configure_target(peek)
 
 include(GNUInstallDirs)
 install(TARGETS peek RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

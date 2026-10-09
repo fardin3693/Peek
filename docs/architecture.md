@@ -1,8 +1,23 @@
-# Peek Architecture (planned)
+# Peek Architecture
 
-> This document describes the **intended** design. As of Milestone 1 none of these subsystems exist. The repository contains only a minimal `src/main.cpp`.
+## Implemented: Milestone 2, Task A
 
-Peek shows a quick, read-only preview of a file in a floating window. The design goals are fast startup, a small footprint, and format support that can grow without touching the rest of the program.
+The application is C++17 with Qt 6 Widgets. Its current path is deliberately small:
+
+```text
+main.cpp: CLI parsing → validatePreviewPath() → PreviewWindow → Qt event loop
+```
+
+- `src/main.cpp` handles help/version, no-argument informational startup, one path operand, errors, and application lifetime. `peek PATH` is the common entry point; `peek -- PATH` protects leading-dash operands.
+- `src/preview_request.h/.cpp` contain a small request/result and local existence/type validation using Qt Core. Files and directories are accepted, valid symlinks retain their spelling, and other filesystem objects are rejected. There is no content parsing, MIME probing, or directory enumeration.
+- `src/preview_window.h/.cpp` implement a concrete decorated widget with plain-text name/path/status labels and Escape dismissal. Closing the only window ends the application. This is a placeholder, not a file renderer or a verified floating/compositor integration.
+- Tests link Qt Test only when enabled. The production executable requires only Qt Widgets and its transitive Qt dependencies.
+
+No Python, IPC, background service, settings framework, handler registry, file-manager integration, or single-instance behavior is implemented. Native CLI/file handling/rendering/GUI remain independent of any future thin desktop adapters. Initial validation is not a guarantee of future access; rendering must handle path changes and access errors when implemented.
+
+## Planned direction (not implemented)
+
+The goal is a fast, lightweight, read-only Quick Look-style preview, triggered with Space and dismissed with Escape. The following design is future intent, not a requirement to scaffold abstractions now. Wayland positioning, focus, and shortcut behavior require real desktop testing.
 
 ```mermaid
 flowchart TD
@@ -52,8 +67,9 @@ Candidate handlers, in rough priority order: plain text/source code, images, Mar
 Thin adapters that translate an external trigger into "preview this path":
 
 - Command line: `peek <path>`.
-- D-Bus service, so file managers and scripts can request previews on a running instance.
-- File-manager hooks, e.g. a Nautilus extension (`nautilus-python` is already present on Omarchy), a script/keybinding for Hyprland, and others later.
+- Initial Nautilus selection handoff through a thin Script calling `peek -- PATH`; the right-click workflow is a testing fallback, not the final UX. Python is permitted only for thin integration when justified.
+- A possible Hyprland shortcut forwarding a dedicated Nautilus Script accelerator. End-to-end reliability, focus, modifiers, and conflicting Space behavior are unverified and must pass real-session acceptance tests before adoption.
+- Optional native D-Bus integration only if an approved later task justifies it; no cached-selection bridge, polling, clipboard tricks, or background daemon.
 - Desktop entry and MIME associations.
 
 Each integration lives in its own module and can be built or omitted independently. The core must work with only the command line.

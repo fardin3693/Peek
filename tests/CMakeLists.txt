@@ -14,3 +14,32 @@ set_tests_properties(peek_version PROPERTIES
     ENVIRONMENT "${PEEK_TEST_ENV}"
     PASS_REGULAR_EXPRESSION "peek [0-9]+\\.[0-9]+\\.[0-9]+"
 )
+
+find_package(Qt6 6.2 REQUIRED COMPONENTS Test)
+
+add_executable(peek_preview_tests
+    test_preview.cpp
+    ../src/preview_request.cpp
+    ../src/preview_window.cpp
+)
+target_include_directories(peek_preview_tests PRIVATE ../src)
+target_link_libraries(peek_preview_tests PRIVATE Qt6::Widgets Qt6::Test)
+peek_configure_target(peek_preview_tests)
+add_dependencies(peek_preview_tests peek)
+
+add_test(NAME peek_preview COMMAND peek_preview_tests)
+set_tests_properties(peek_preview PROPERTIES
+    ENVIRONMENT "${PEEK_TEST_ENV};PEEK_TEST_EXECUTABLE=$<TARGET_FILE:peek>"
+    TIMEOUT 90
+)
+
+add_test(NAME peek_cli COMMAND ${CMAKE_COMMAND}
+    "-DPEEK_EXECUTABLE=$<TARGET_FILE:peek>"
+    "-DPEEK_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures"
+    "-DPEEK_VERSION=${PROJECT_VERSION}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/check_cli.cmake"
+)
+set_tests_properties(peek_cli PROPERTIES
+    ENVIRONMENT "${PEEK_TEST_ENV}"
+    TIMEOUT 60
+)
