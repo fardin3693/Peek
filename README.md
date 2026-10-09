@@ -6,21 +6,23 @@ Target platform: Linux desktops, developed first on Omarchy (Arch Linux, Hyprlan
 
 ## Status
 
-**Milestone 2, Tasks A–B: native placeholder preview and minimal Nautilus selection handoff.**
+**Milestone 2, Tasks A–B plus native image previews: placeholder window with real image rendering and minimal Nautilus selection handoff.**
 
 Implemented:
 
 - CMake/Qt 6 Widgets build with a `peek` executable.
-- `peek PATH` validates a local file or directory and opens a small native Qt window showing its name, absolute path, and placeholder status.
+- `peek PATH` validates a local file or directory. Supported image files are decoded with Qt's `QImageReader` (with EXIF auto-transform) and shown in a native Qt window with their name, absolute path, dimensions, and format; the image scales to the window while preserving aspect ratio and updates on resize.
+- Verified by automated tests: PNG, JPEG, and WebP. Other files readable by the installed Qt image plugins are attempted through the same path; anything else shows a plain-text "No image preview is available for this file." message, and unreadable/corrupt images show "Could not load an image preview of this file (...)." instead of crashing. Large images are downscaled at decode time (longest side capped at 2048 px) and the initial window is capped at 1024×768.
+- Directories keep the placeholder ("Directory preview not implemented yet."); their contents are not scanned.
 - Escape or the ordinary window close action dismisses the window and exits Peek.
 - With no arguments, Peek prints startup information and brief usage, then exits successfully. `--help` and `--version` remain available.
 - Optional Nautilus Script reads the current selection and launches native `peek -- PATH`; right-click Scripts is a diagnostic fallback, not the final UX.
 - CTest smoke tests plus native path-validation, widget-dismissal, CLI argument/error, and Nautilus handoff tests.
 - Debug, Release and ASan/UBSan presets.
 
-Not implemented yet: file rendering, file-format handlers, Hyprland shortcuts, Space-to-preview/toggle, and single-instance behavior. The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification.
+Not implemented yet: non-image file rendering (text, PDF, audio/video, archives), Hyprland shortcuts, Space-to-preview/toggle, and single-instance behavior. The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification.
 
-Peek does not read file contents or enumerate directories in this milestone. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
+Peek reads file contents only to decode images via Qt's image plugins; it does not enumerate directories in this milestone. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
 
 ## Dependencies
 
@@ -92,11 +94,11 @@ Remote URIs are not supported; operands are filesystem paths. No file-manager se
 | `1` | Missing/inaccessible path, broken symlink, or unsupported filesystem object (e.g. FIFO/device/socket) |
 | `2` | CLI usage error: empty operand, multiple operands, or unknown option |
 
-Failures report a diagnostic on stderr and create no preview window. Existence/type validation does not guarantee readability or that a path will remain unchanged; rendering must revalidate access when it is implemented.
+Failures report a diagnostic on stderr and create no preview window. Existence/type validation does not guarantee readability or that a path will remain unchanged; image decoding re-reads the file and reports failures in the window instead of crashing.
 
 ## Nautilus selection handoff (diagnostic fallback)
 
-See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installation and Omarchy acceptance tests. The Script belongs at `~/.local/share/nautilus/scripts/Peek` on the default desktop setup. It decodes only local `file:` URIs and uses the first item in Nautilus-provided order for multiple selections; directories use the existing native placeholder. No shortcut, daemon, selection cache, polling, clipboard, or desktop configuration change is involved.
+See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installation and Omarchy acceptance tests. The Script belongs at `~/.local/share/nautilus/scripts/Peek` on the default desktop setup. It decodes only local `file:` URIs and uses the first item in Nautilus-provided order for multiple selections; directories use the existing directory placeholder and image files now render. No shortcut, daemon, selection cache, polling, clipboard, or desktop configuration change is involved.
 
 ## Development workflow
 

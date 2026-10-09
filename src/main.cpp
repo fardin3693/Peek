@@ -27,7 +27,7 @@ int main(int argc, char *argv[])
 
     QCommandLineParser parser;
     parser.setApplicationDescription(
-        QStringLiteral("Peek: lightweight Quick Look-style file previewer (placeholder preview)."));
+        QStringLiteral("Peek: lightweight Quick Look-style file previewer (image preview)."));
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addPositionalArgument(QStringLiteral("path"),
@@ -50,7 +50,7 @@ int main(int argc, char *argv[])
         out << "Peek " << QApplication::applicationVersion() << " (Qt " << qVersion()
             << ", platform: " << QApplication::platformName() << ")\n"
             << "Usage: peek [options] PATH\n"
-            << "Run 'peek --help' for usage. Rendering is not implemented yet.\n";
+            << "Run 'peek --help' for usage. Only image files and directories are supported.\n";
         return 0;
     }
     if (paths.size() != 1) {

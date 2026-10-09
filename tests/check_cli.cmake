@@ -92,7 +92,7 @@ run_cli("help" 0 "--help")
 expect_stderr("help" "")
 expect_contains("help" "${CLI_STDOUT}" "Usage:")
 expect_contains("help" "${CLI_STDOUT}" "path")
-expect_contains("help" "${CLI_STDOUT}" "placeholder preview")
+expect_contains("help" "${CLI_STDOUT}" "image preview")
 
 run_cli("version" 0 "--version")
 if(NOT CLI_STDOUT MATCHES "^peek [0-9]+\\.[0-9]+\\.[0-9]+\n$")

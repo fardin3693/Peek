@@ -1,6 +1,6 @@
 # Peek Architecture
 
-## Implemented: Milestone 2, Tasks A–B
+## Implemented: Milestone 2, Tasks A–B, plus native image previews
 
 The application is C++17 with Qt 6 Widgets. Its current path is deliberately small:
 
@@ -10,7 +10,7 @@ main.cpp: CLI parsing → validatePreviewPath() → PreviewWindow → Qt event l
 
 - `src/main.cpp` handles help/version, no-argument informational startup, one path operand, errors, and application lifetime. `peek PATH` is the common entry point; `peek -- PATH` protects leading-dash operands.
 - `src/preview_request.h/.cpp` contain a small request/result and local existence/type validation using Qt Core. Files and directories are accepted, valid symlinks retain their spelling, and other filesystem objects are rejected. There is no content parsing, MIME probing, or directory enumeration.
-- `src/preview_window.h/.cpp` implement a concrete decorated widget with plain-text name/path/status labels and Escape dismissal. Closing the only window ends the application. This is a placeholder, not a file renderer or a verified floating/compositor integration.
+- `src/preview_window.h/.cpp` implement a concrete decorated widget with plain-text name/path/status labels, an image view, and Escape dismissal. Closing the only window ends the application. For files, the window attempts a native image preview with `QImageReader` (EXIF auto-transform honored): PNG, JPEG, and WebP are verified by tests, and any other format readable by the installed Qt image plugins goes through the same path. On this development machine the runtime reports bmp, cur, gif, icns, ico, jfif, jp2, jpeg, jpg, mng, pbm, pgm, png, ppm, svg, svgz, tga, tif, tiff, wbmp, webp, xbm, xpm. Images larger than 2048 px on the longest side are downscaled at decode time via `setScaledSize`; the displayed pixmap is scaled to the image label with `KeepAspectRatio`/`SmoothTransformation` on resize, and the initial window is capped at 1024×768. Directories keep the "Directory preview not implemented yet." placeholder. Unsupported files show "No image preview is available for this file." and undecodable images show "Could not load an image preview of this file (...)." — never a crash. No new production dependency: image I/O comes from Qt Gui (transitive via Widgets), and no Python is on the preview startup path. This is still not a verified floating/compositor integration.
 - Tests link Qt Test only when enabled. The production executable requires only Qt Widgets and its transitive Qt dependencies.
 
 The optional `integrations/nautilus/peek-nautilus.py` Script is a thin, standalone Python standard-library adapter:
@@ -23,7 +23,7 @@ Nautilus Script invocation → NAUTILUS_SCRIPT_SELECTED_URIS → first local URI
 
 It reads selection only at invocation, preserves Nautilus-provided order, decodes percent escapes exactly once as UTF-8, and never constructs a shell command. Python is justified here by safe URI parsing and subprocess argument arrays without shell quoting; it owns no native application logic. Directories and filesystem failures are handled by the native validator. The Script waits until Peek exits so startup/path failures can be reported on stderr and, optionally, through `notify-send`. It is not a daemon or a single-instance controller. Installation and the diagnostic right-click workflow are documented in [nautilus-script.md](nautilus-script.md).
 
-No IPC, background service, settings framework, handler registry, selection caching, polling, clipboard communication, shortcuts, or single-instance behavior is implemented. Native CLI/file handling/rendering/GUI remain independent of the adapter. Initial validation is not a guarantee of future access; rendering must handle path changes and access errors when implemented.
+No IPC, background service, settings framework, handler registry, selection caching, polling, clipboard communication, shortcuts, or single-instance behavior is implemented. Native CLI/file handling/image rendering/GUI remain independent of the adapter. Initial validation is not a guarantee of future access; image decoding re-reads the file and surfaces read/decode failures in the window.
 
 ## Planned direction (not implemented)
 

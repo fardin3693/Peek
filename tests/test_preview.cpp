@@ -5,7 +5,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
+#include <QImageReader>
 #include <QLabel>
+#include <QPixmap>
 #include <QProcess>
 #include <QTemporaryDir>
 #include <QTest>
@@ -80,6 +83,13 @@ bool createFixture(const QString &path, bool isDirectory)
     return file.open(QIODevice::WriteOnly) && file.write(contents) == contents.size();
 }
 
+bool writeTestImage(const QString &path, const QSize &size, const char *format)
+{
+    QImage image(size, QImage::Format_RGB32);
+    image.fill(Qt::darkCyan);
+    return image.save(path, format);
+}
+
 QString inputPath(const QString &absolutePath, bool isRelative)
 {
     return isRelative ? QDir::current().relativeFilePath(absolutePath) : absolutePath;
@@ -121,7 +131,7 @@ void checkWindow(const PreviewRequest &request, QString name = {})
     QCOMPARE(path->text(), request.path);
     QCOMPARE(status->text(), request.isDirectory
                                  ? QStringLiteral("Directory preview not implemented yet.")
-                                 : QStringLiteral("Preview rendering not implemented yet."));
+                                 : QStringLiteral("No image preview is available for this file."));
     for (const auto *label : {fileName, path, status}) {
         QCOMPARE(label->textFormat(), Qt::PlainText);
         QVERIFY(label->wordWrap());
@@ -416,6 +426,148 @@ class PreviewTests : public QObject
         QCOMPARE(result.request.path, root);
         QVERIFY(result.request.isDirectory);
         checkWindow(result.request);
+    }
+
+    void imageLoad_data()
+    {
+        QTest::addColumn<QString>("fileName");
+        QTest::addColumn<QByteArray>("format");
+        QTest::newRow("png") << QStringLiteral("photo.png") << QByteArray("png");
+        QTest::newRow("jpeg") << QStringLiteral("photo.jpg") << QByteArray("jpg");
+        QTest::newRow("webp") << QStringLiteral("photo.webp") << QByteArray("webp");
+    }
+
+    void imageLoad()
+    {
+        QFETCH(QString, fileName);
+        QFETCH(QByteArray, format);
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(fileName);
+        QVERIFY2(writeTestImage(path, QSize(64, 48), format.constData()),
+                 "Qt could not write the test image; check installed image plugins.");
+        QVERIFY(QImageReader(path).canRead());
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        QVERIFY(!result.request.isDirectory);
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isImagePreview());
+        QCOMPARE(window.originalImageSize(), QSize(64, 48));
+
+        auto *image = window.findChild<QLabel *>(QStringLiteral("imageLabel"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(image != nullptr);
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("64 × 48")));
+        QVERIFY(window.windowTitle().contains(QFileInfo(path).fileName()));
+
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(!window.findChild<QLabel *>(QStringLiteral("imageLabel"))->pixmap().isNull());
+    }
+
+    void unsupportedFile()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("notes.txt"));
+        QVERIFY(createFixture(path, false));
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->text(), QStringLiteral("No image preview is available for this file."));
+    }
+
+    void corruptImage()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("broken.png"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray garbage("this is not image data at all");
+        QVERIFY(file.write(garbage) == garbage.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        // Either "no preview" or "could not load" is acceptable; both must be
+        // non-empty, plain text, and must not crash or show an image.
+        QVERIFY(!window.isImagePreview());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(!status->text().isEmpty());
+        QVERIFY(status->text().contains(QStringLiteral("image preview")));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+    }
+
+    void fittedSizeAspect()
+    {
+        QCOMPARE(PreviewWindow::fittedSize(QSize(2000, 1000), QSize(1024, 768)), QSize(1024, 512));
+        QCOMPARE(PreviewWindow::fittedSize(QSize(1000, 2000), QSize(1024, 768)), QSize(384, 768));
+        QCOMPARE(PreviewWindow::fittedSize(QSize(100, 100), QSize(1024, 768)), QSize(100, 100));
+        QCOMPARE(PreviewWindow::fittedSize(QSize(), QSize(1024, 768)), QSize());
+        QCOMPARE(PreviewWindow::fittedSize(QSize(64, 48), QSize()), QSize(64, 48));
+        // Aspect ratio is preserved for a 3:2 image.
+        const QSize fitted = PreviewWindow::fittedSize(QSize(3000, 2000), QSize(2048, 2048));
+        QCOMPARE(fitted, QSize(2048, 1365));
+        QVERIFY(qAbs(fitted.width() * 2 - fitted.height() * 3) <= 2);
+    }
+
+    void largeImageDecodeBound()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("large.png"));
+        QVERIFY(writeTestImage(path, QSize(3000, 2000), "png"));
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isImagePreview());
+        const QSize decoded = window.originalImageSize();
+        QVERIFY(decoded.width() <= 2048);
+        QVERIFY(decoded.height() <= 2048);
+        // 3:2 aspect preserved within rounding.
+        QVERIFY(qAbs(decoded.width() * 2 - decoded.height() * 3) <= 4);
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.width() <= 1024);
+        QVERIFY(window.height() <= 768);
+    }
+
+    void imageEscapeClosesWindow()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("escape.png"));
+        QVERIFY(writeTestImage(path, QSize(64, 48), "png"));
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isImagePreview());
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&window, 3000));
+        QVERIFY(window.isVisible());
+        QTest::keyClick(&window, Qt::Key_Escape);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 2000);
     }
 
     void escapeClosesWindow_data() { addTypeRows(); }
