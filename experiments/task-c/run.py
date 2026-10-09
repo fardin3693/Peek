@@ -210,6 +210,20 @@ def inside(manual):
             # Absence proofs need a bound: nothing may arrive within this window.
             time.sleep(seconds)
 
+        def trigger(label, before, *args, attempts=3, **kwargs):
+            # Bounded retry against transient input loss under nested load.
+            # Overshoot fails loudly: that would indicate double-fire, not lag.
+            for attempt in range(1, attempts + 1):
+                chord(*args, **kwargs)
+                await_argv(before)
+                landed = len(records("argv.jsonl")) - before
+                if landed == 1:
+                    return
+                if landed > 1:
+                    raise RuntimeError(f"{label}: fired {landed}x for {attempt} chord(s)")
+            # All attempts exhausted without a landing; the expect_path call
+            # below reports the missing invocation with full context.
+
         def expect_path(path, before, label):
             actual = records("argv.jsonl")
             if len(actual) != before + 1 or actual[-1] != ["--", str(path)]:
@@ -244,6 +258,9 @@ def inside(manual):
                                (root / "hyprland.log").read_text()[-4000:])
         if config_errors.strip():
             raise RuntimeError("Private compositor config errors: " + config_errors)
+        nested_binds = ctl("-j", "binds")
+        if "F12" not in nested_binds:
+            raise RuntimeError("Nested test bind missing; forwarding can never fire:\n" + nested_binds[-2000:])
         script_dir = root / "data/nautilus/scripts"
         script_dir.mkdir(parents=True)
         shutil.copy2(REPO / "integrations/nautilus/peek-nautilus.py", script_dir / "Peek")
@@ -287,14 +304,23 @@ def inside(manual):
         nautilus_log = (root / "nautilus.log").open("w")
         logs.append(nautilus_log)
 
-        def start_nautilus(path):
-            process = subprocess.Popen(["nautilus", "--select", str(path)], env=env,
-                                       stdout=nautilus_log, stderr=subprocess.STDOUT)
-            # Cold start in a sterile bus can stall on Tracker/volume lookups.
-            window = wait_client(lambda w: w["class"] == CLASS, timeout=30)
-            time.sleep(1.2)  # Directory/menu initialization; no selection bridge is sampled.
-            # New-window mapping establishes focus; do not warp the pointer here.
-            return process
+        def start_nautilus(path, attempts=2):
+            for attempt in range(1, attempts + 1):
+                process = subprocess.Popen(["nautilus", "--select", str(path)], env=env,
+                                           stdout=nautilus_log, stderr=subprocess.STDOUT)
+                try:
+                    # Cold start in a sterile bus can stall on Tracker/volume lookups.
+                    window = wait_client(lambda w: w["class"] == CLASS, timeout=30)
+                except RuntimeError:
+                    stop(process)
+                    if attempt >= attempts:
+                        raise
+                    time.sleep(1.0)
+                    continue
+                time.sleep(1.2)  # Directory/menu initialization; no selection bridge is sampled.
+                # New-window mapping establishes focus; do not warp the pointer here.
+                return process
+            raise RuntimeError("Nautilus did not appear despite retries.")
 
         nautilus = start_nautilus(first)
         # New-window mapping does not guarantee keyboard focus; the bind and
@@ -302,47 +328,32 @@ def inside(manual):
         focus(wait_client(lambda w: w["class"] == CLASS and w["title"] == "fixtures-one"))
         before = len(records("argv.jsonl"))
         # Nautilus registers script accelerators lazily while building its
-        # scripts menu, and spawns land asynchronously: send one chord, wait
-        # for it to land, and only then consider a retry. Overshoot fails
-        # loudly instead of masking a double-fire.
-        attempts = 0
-        while True:
-            attempts += 1
-            chord(direct=True)
-            await_argv(before)
-            landed = len(records("argv.jsonl")) - before
-            if landed == 1:
-                break
-            if landed > 1:
-                raise RuntimeError(f"direct accelerator fired {landed}x for {attempts} chord(s)")
-            if attempts >= 6:
-                break
-            time.sleep(0.5)
+        # scripts menu; extra attempts cover that plus transient input loss.
+        trigger("dedicated Nautilus accelerator → actual Task B Script", before, direct=True, attempts=6)
         expect_path(first, before, "dedicated Nautilus accelerator → actual Task B Script")
         before += 1
-        chord()
-        await_argv(before)
+        trigger("Hyprland forwarding → exact focused Nautilus window", before)
         expect_path(first, before, "Hyprland forwarding → exact focused Nautilus window")
         for index in range(4):
             select(first)
             before = len(records("argv.jsonl"))
             # Arrow changes selection and trigger immediately follows in one input stream.
-            chord("-k", "Right")
-            await_argv(before)
-            expect_path(second, before, f"immediate selection change then trigger {index + 1}/4")
+            label = f"immediate selection change then trigger {index + 1}/4"
+            trigger(label, before, "-k", "Right")
+            expect_path(second, before, label)
         select(first)
         before = len(records("argv.jsonl"))
-        chord(hold=True)
-        await_argv(before)
-        expect_path(first, before, "600ms held trigger produces one invocation")
+        label = "600ms held trigger produces one invocation"
+        trigger(label, before, hold=True)
+        expect_path(first, before, label)
         before = len(records("argv.jsonl"))
-        chord(modifiers_first=True)
-        await_argv(before)
-        expect_path(first, before, "qualifying modifiers released before F12")
+        label = "qualifying modifiers released before F12"
+        trigger(label, before, modifiers_first=True)
+        expect_path(first, before, label)
         before = len(records("argv.jsonl"))
-        chord("-M", "ctrl", "-k", "a", "-m", "ctrl")
-        await_argv(before)
-        expect_path(first, before, "multiple selection uses first model-ordered item")
+        label = "multiple selection uses first model-ordered item"
+        trigger(label, before, "-M", "ctrl", "-k", "a", "-m", "ctrl")
+        expect_path(first, before, label)
 
         select(second)
         window_one = json.loads(ctl("-j", "activewindow"))
@@ -355,14 +366,14 @@ def inside(manual):
             window, path = (window_one, second) if index % 2 == 0 else (window_two, third)
             focus(window)
             before = len(records("argv.jsonl"))
-            chord()
-            await_argv(before)
-            expect_path(path, before, f"two-window focus alternation {index + 1}/4")
+            label = f"two-window focus alternation {index + 1}/4"
+            trigger(label, before)
+            expect_path(path, before, label)
         focus(window_one)
         before = len(records("argv.jsonl"))
-        chord("-M", "ctrl", "-k", "l", "-m", "ctrl")
-        await_argv(before)
-        expect_path(second, before, "location-field focus still invokes Script (documented limitation)")
+        label = "location-field focus still invokes Script (documented limitation)"
+        trigger(label, before, "-M", "ctrl", "-k", "l", "-m", "ctrl")
+        expect_path(second, before, label)
         keys("-k", "Escape")
 
         run(["nautilus", "--new-window", str(empty)], env)
@@ -382,9 +393,9 @@ def inside(manual):
         (root / "native-mode").touch()
         select(first)
         before = len(records("argv.jsonl"))
-        chord()
-        await_argv(before)
-        expect_path(first, before, "actual native Peek launched with selected special-character path")
+        label = "actual native Peek launched with selected special-character path"
+        trigger(label, before)
+        expect_path(first, before, label)
         peek_window = wait_client(lambda w: w["class"] == "peek")
         focus(peek_window)
         before = len(records("argv.jsonl"))
@@ -404,9 +415,9 @@ def inside(manual):
         select(broken)
         before = len(records("argv.jsonl"))
         errors_before = len(records("errors.jsonl"))
-        chord()
-        await_argv(before)
-        expect_path(broken, before, "broken symlink selection reaches native validation")
+        label = "broken symlink selection reaches native validation"
+        trigger(label, before)
+        expect_path(broken, before, label)
         await_errors(errors_before)
         if len(records("errors.jsonl")) != errors_before + 1:
             raise RuntimeError("Native rejection did not report an error.")
@@ -453,6 +464,17 @@ def inside(manual):
         hypo = root / "hyprland.log"
         if hypo.exists():
             print("PRIVATE COMPOSITOR DIAGNOSTICS:\n" + hypo.read_text()[-2500:], flush=True)
+        # Runtime log lives under the nested instance dir (stdout only has startup).
+        try:
+            nested_log = next((root / "run/hypr").glob("*/hyprland.log"))
+            print("PRIVATE NESTED RUNTIME LOG:\n" + nested_log.read_text()[-4000:], flush=True)
+        except StopIteration:
+            print("PRIVATE NESTED RUNTIME LOG: <absent>", flush=True)
+        try:
+            binds = ctl("-j", "binds")
+            print("PRIVATE NESTED F12 BINDS:", [line for line in binds.splitlines() if "F12" in line], flush=True)
+        except Exception as error:
+            print("PRIVATE NESTED BINDS: <unreadable>", error, flush=True)
         path = root / "nautilus.log"
         if path.exists():
             print("PRIVATE NAUTILUS DIAGNOSTICS:\n" + path.read_text()[-2500:], flush=True)

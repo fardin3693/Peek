@@ -53,3 +53,13 @@ set_tests_properties(peek_nautilus PROPERTIES
     ENVIRONMENT "${PEEK_TEST_ENV};PEEK_TEST_EXECUTABLE=$<TARGET_FILE:peek>"
     TIMEOUT 60
 )
+
+# Regression guard: the Task C experiment lab must stay runnable. Unresolved
+# merge markers and syntax errors fail here, before the experiment runs.
+add_test(NAME peek_taskc_lab_guard COMMAND ${Python3_EXECUTABLE} -B
+    "${CMAKE_CURRENT_SOURCE_DIR}/check_taskc_lab.py"
+)
+set_tests_properties(peek_taskc_lab_guard PROPERTIES
+    ENVIRONMENT "${PEEK_TEST_ENV}"
+    TIMEOUT 60
+)
