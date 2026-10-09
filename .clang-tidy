@@ -1,0 +1,10 @@
+Checks: >
+  -*,
+  bugprone-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers
+HeaderFilterRegex: '^.*/Peek/(src|tests)/.*'
