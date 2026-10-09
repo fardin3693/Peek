@@ -43,3 +43,13 @@ set_tests_properties(peek_cli PROPERTIES
     ENVIRONMENT "${PEEK_TEST_ENV}"
     TIMEOUT 60
 )
+
+# Python is used only by the optional desktop adapter and its tests, not Peek.
+find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+add_test(NAME peek_nautilus COMMAND ${Python3_EXECUTABLE} -B
+    "${CMAKE_CURRENT_SOURCE_DIR}/test_nautilus.py"
+)
+set_tests_properties(peek_nautilus PROPERTIES
+    ENVIRONMENT "${PEEK_TEST_ENV};PEEK_TEST_EXECUTABLE=$<TARGET_FILE:peek>"
+    TIMEOUT 60
+)

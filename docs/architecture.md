@@ -1,6 +1,6 @@
 # Peek Architecture
 
-## Implemented: Milestone 2, Task A
+## Implemented: Milestone 2, Tasks A–B
 
 The application is C++17 with Qt 6 Widgets. Its current path is deliberately small:
 
@@ -13,7 +13,17 @@ main.cpp: CLI parsing → validatePreviewPath() → PreviewWindow → Qt event l
 - `src/preview_window.h/.cpp` implement a concrete decorated widget with plain-text name/path/status labels and Escape dismissal. Closing the only window ends the application. This is a placeholder, not a file renderer or a verified floating/compositor integration.
 - Tests link Qt Test only when enabled. The production executable requires only Qt Widgets and its transitive Qt dependencies.
 
-No Python, IPC, background service, settings framework, handler registry, file-manager integration, or single-instance behavior is implemented. Native CLI/file handling/rendering/GUI remain independent of any future thin desktop adapters. Initial validation is not a guarantee of future access; rendering must handle path changes and access errors when implemented.
+The optional `integrations/nautilus/peek-nautilus.py` Script is a thin, standalone Python standard-library adapter:
+
+```text
+Nautilus Script invocation → NAUTILUS_SCRIPT_SELECTED_URIS → first local URI
+                         → decoded absolute path → argv [peek, --, PATH]
+                         → existing native CLI / placeholder window
+```
+
+It reads selection only at invocation, preserves Nautilus-provided order, decodes percent escapes exactly once as UTF-8, and never constructs a shell command. Python is justified here by safe URI parsing and subprocess argument arrays without shell quoting; it owns no native application logic. Directories and filesystem failures are handled by the native validator. The Script waits until Peek exits so startup/path failures can be reported on stderr and, optionally, through `notify-send`. It is not a daemon or a single-instance controller. Installation and the diagnostic right-click workflow are documented in [nautilus-script.md](nautilus-script.md).
+
+No IPC, background service, settings framework, handler registry, selection caching, polling, clipboard communication, shortcuts, or single-instance behavior is implemented. Native CLI/file handling/rendering/GUI remain independent of the adapter. Initial validation is not a guarantee of future access; rendering must handle path changes and access errors when implemented.
 
 ## Planned direction (not implemented)
 
@@ -67,7 +77,7 @@ Candidate handlers, in rough priority order: plain text/source code, images, Mar
 Thin adapters that translate an external trigger into "preview this path":
 
 - Command line: `peek <path>`.
-- Initial Nautilus selection handoff through a thin Script calling `peek -- PATH`; the right-click workflow is a testing fallback, not the final UX. Python is permitted only for thin integration when justified.
+- Implemented: initial Nautilus selection handoff through a thin Script calling `peek -- PATH`; the right-click workflow is a diagnostic fallback, not the final UX. Python is limited to the standard-library adapter and its tests.
 - A possible Hyprland shortcut forwarding a dedicated Nautilus Script accelerator. End-to-end reliability, focus, modifiers, and conflicting Space behavior are unverified and must pass real-session acceptance tests before adoption.
 - Optional native D-Bus integration only if an approved later task justifies it; no cached-selection bridge, polling, clipboard tricks, or background daemon.
 - Desktop entry and MIME associations.
@@ -95,6 +105,7 @@ Directories are added only when they have content.
 ```
 src/            application code (core, ui, handlers, integrations as it grows)
 tests/          CTest tests
+integrations/   optional desktop adapters (Nautilus Script implemented)
 docs/           documentation
 resources/      icons, desktop file, etc. (added when first needed)
 ```

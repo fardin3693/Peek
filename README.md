@@ -6,7 +6,7 @@ Target platform: Linux desktops, developed first on Omarchy (Arch Linux, Hyprlan
 
 ## Status
 
-**Milestone 2, Task A: native CLI and placeholder preview window.**
+**Milestone 2, Tasks A–B: native placeholder preview and minimal Nautilus selection handoff.**
 
 Implemented:
 
@@ -14,12 +14,13 @@ Implemented:
 - `peek PATH` validates a local file or directory and opens a small native Qt window showing its name, absolute path, and placeholder status.
 - Escape or the ordinary window close action dismisses the window and exits Peek.
 - With no arguments, Peek prints startup information and brief usage, then exits successfully. `--help` and `--version` remain available.
-- CTest smoke tests plus native path-validation, widget-dismissal, and CLI argument/error tests.
+- Optional Nautilus Script reads the current selection and launches native `peek -- PATH`; right-click Scripts is a diagnostic fallback, not the final UX.
+- CTest smoke tests plus native path-validation, widget-dismissal, CLI argument/error, and Nautilus handoff tests.
 - Debug, Release and ASan/UBSan presets.
 
-Not implemented yet: file rendering, file-format handlers, Nautilus/Hyprland integration, Space-to-preview/toggle, and single-instance behavior. The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification.
+Not implemented yet: file rendering, file-format handlers, Hyprland shortcuts, Space-to-preview/toggle, and single-instance behavior. The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification.
 
-Peek does not read file contents or enumerate directories in this milestone. Python is not required by the application.
+Peek does not read file contents or enumerate directories in this milestone. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
 
 ## Dependencies
 
@@ -33,7 +34,7 @@ Required:
 | Qt 6 (>= 6.2) Widgets | Arch: `qt6-base` |
 | Qt 6 Wayland platform plugin | Arch: `qt6-wayland` (for native Wayland sessions) |
 
-Tests additionally require Qt 6 Test (included in Arch's `qt6-base`). It is discovered only when `PEEK_BUILD_TESTS=ON` (the default). To build the application without tests, configure with `-DPEEK_BUILD_TESTS=OFF`.
+Tests additionally require Qt 6 Test (included in Arch's `qt6-base`) and Python >= 3.9 (Arch: `python`) for the handoff suite. These are discovered only when `PEEK_BUILD_TESTS=ON` (the default). To build the native application without tests or a Python requirement, configure with `-DPEEK_BUILD_TESTS=OFF`.
 
 Optional development tools (none are required to build):
 
@@ -92,6 +93,10 @@ Remote URIs are not supported; operands are filesystem paths. No file-manager se
 | `2` | CLI usage error: empty operand, multiple operands, or unknown option |
 
 Failures report a diagnostic on stderr and create no preview window. Existence/type validation does not guarantee readability or that a path will remain unchanged; rendering must revalidate access when it is implemented.
+
+## Nautilus selection handoff (diagnostic fallback)
+
+See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installation and Omarchy acceptance tests. The Script belongs at `~/.local/share/nautilus/scripts/Peek` on the default desktop setup. It decodes only local `file:` URIs and uses the first item in Nautilus-provided order for multiple selections; directories use the existing native placeholder. No shortcut, daemon, selection cache, polling, clipboard, or desktop configuration change is involved.
 
 ## Development workflow
 
