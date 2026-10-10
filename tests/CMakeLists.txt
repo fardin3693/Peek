@@ -21,9 +21,15 @@ add_executable(peek_preview_tests
     test_preview.cpp
     ../src/preview_request.cpp
     ../src/preview_window.cpp
+    ../src/text_preview.cpp
 )
 target_include_directories(peek_preview_tests PRIVATE ../src)
 target_link_libraries(peek_preview_tests PRIVATE Qt6::Widgets Qt6::Test)
+if(PEEK_HAVE_POPPLER)
+    target_sources(peek_preview_tests PRIVATE ../src/pdf_preview.cpp ../src/pdf_preview.h)
+    target_compile_definitions(peek_preview_tests PRIVATE PEEK_WITH_PDF)
+    target_link_libraries(peek_preview_tests PRIVATE PkgConfig::POPPLER_CPP)
+endif()
 peek_configure_target(peek_preview_tests)
 add_dependencies(peek_preview_tests peek)
 

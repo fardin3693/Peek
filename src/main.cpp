@@ -26,8 +26,15 @@ int main(int argc, char *argv[])
     QApplication::setApplicationVersion(QStringLiteral(PEEK_VERSION));
 
     QCommandLineParser parser;
+#ifdef PEEK_WITH_PDF
     parser.setApplicationDescription(
-        QStringLiteral("Peek: lightweight Quick Look-style file previewer (image preview)."));
+        QStringLiteral("Peek: lightweight Quick Look-style file previewer (image preview, PDF "
+                       "preview, plus text preview)."));
+#else
+    parser.setApplicationDescription(
+        QStringLiteral("Peek: lightweight Quick Look-style file previewer (image preview, plus "
+                       "text preview)."));
+#endif
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addPositionalArgument(QStringLiteral("path"),
@@ -50,7 +57,13 @@ int main(int argc, char *argv[])
         out << "Peek " << QApplication::applicationVersion() << " (Qt " << qVersion()
             << ", platform: " << QApplication::platformName() << ")\n"
             << "Usage: peek [options] PATH\n"
-            << "Run 'peek --help' for usage. Only image files and directories are supported.\n";
+#ifdef PEEK_WITH_PDF
+            << "Run 'peek --help' for usage. Only image files, PDFs, text files and directories "
+               "are supported.\n";
+#else
+            << "Run 'peek --help' for usage. Only image files, text files and directories are "
+               "supported.\n";
+#endif
         return 0;
     }
     if (paths.size() != 1) {
