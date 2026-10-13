@@ -26,10 +26,18 @@ int main(int argc, char *argv[])
     QApplication::setApplicationVersion(QStringLiteral(PEEK_VERSION));
 
     QCommandLineParser parser;
-#ifdef PEEK_WITH_PDF
+#if defined(PEEK_WITH_PDF) && defined(PEEK_WITH_MULTIMEDIA)
+    parser.setApplicationDescription(
+        QStringLiteral("Peek: lightweight Quick Look-style file previewer (image preview, PDF "
+                       "preview, video preview, audio preview, plus text preview)."));
+#elif defined(PEEK_WITH_PDF)
     parser.setApplicationDescription(
         QStringLiteral("Peek: lightweight Quick Look-style file previewer (image preview, PDF "
                        "preview, plus text preview)."));
+#elif defined(PEEK_WITH_MULTIMEDIA)
+    parser.setApplicationDescription(
+        QStringLiteral("Peek: lightweight Quick Look-style file previewer (image preview, video "
+                       "preview, audio preview, plus text preview)."));
 #else
     parser.setApplicationDescription(
         QStringLiteral("Peek: lightweight Quick Look-style file previewer (image preview, plus "
@@ -57,9 +65,15 @@ int main(int argc, char *argv[])
         out << "Peek " << QApplication::applicationVersion() << " (Qt " << qVersion()
             << ", platform: " << QApplication::platformName() << ")\n"
             << "Usage: peek [options] PATH\n"
-#ifdef PEEK_WITH_PDF
+#if defined(PEEK_WITH_PDF) && defined(PEEK_WITH_MULTIMEDIA)
+            << "Run 'peek --help' for usage. Only image files, PDFs, videos, audio files, text "
+               "files and directories are supported.\n";
+#elif defined(PEEK_WITH_PDF)
             << "Run 'peek --help' for usage. Only image files, PDFs, text files and directories "
                "are supported.\n";
+#elif defined(PEEK_WITH_MULTIMEDIA)
+            << "Run 'peek --help' for usage. Only image files, videos, audio files, text files "
+               "and directories are supported.\n";
 #else
             << "Run 'peek --help' for usage. Only image files, text files and directories are "
                "supported.\n";

@@ -1,0 +1,11 @@
+# LeakSanitizer suppressions for Peek's preview tests (test-only).
+#
+# Qt 6.11.2 does not release a shown QVideoWidget's backing store before
+# LSan's exit-time check on the offscreen platform. Proven Peek-independent:
+# a bare shown QVideoWidget with no QMediaPlayer and no Peek code leaks
+# identically (~1 MiB, same QVideoWindow::event -> QBackingStore stacks),
+# while a hidden QVideoWidget and a standalone QMediaPlayer are leak-clean.
+# Peek deletes every object it creates (player stopped, source cleared,
+# widgets parented); all suppressed stacks are Qt-internal with no Peek
+# frames, so Peek-owned leaks still fail the gate.
+leak:QVideoWindow::event

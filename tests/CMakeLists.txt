@@ -22,9 +22,15 @@ add_executable(peek_preview_tests
     ../src/preview_request.cpp
     ../src/preview_window.cpp
     ../src/text_preview.cpp
+    ../src/video_preview.cpp
+    ../src/audio_preview.cpp
 )
 target_include_directories(peek_preview_tests PRIVATE ../src)
 target_link_libraries(peek_preview_tests PRIVATE Qt6::Widgets Qt6::Test)
+if(PEEK_HAVE_MULTIMEDIA)
+    target_compile_definitions(peek_preview_tests PRIVATE PEEK_WITH_MULTIMEDIA)
+    target_link_libraries(peek_preview_tests PRIVATE Qt6::Multimedia Qt6::MultimediaWidgets)
+endif()
 if(PEEK_HAVE_POPPLER)
     target_sources(peek_preview_tests PRIVATE ../src/pdf_preview.cpp ../src/pdf_preview.h)
     target_compile_definitions(peek_preview_tests PRIVATE PEEK_WITH_PDF)
@@ -35,7 +41,7 @@ add_dependencies(peek_preview_tests peek)
 
 add_test(NAME peek_preview COMMAND peek_preview_tests)
 set_tests_properties(peek_preview PROPERTIES
-    ENVIRONMENT "${PEEK_TEST_ENV};PEEK_TEST_EXECUTABLE=$<TARGET_FILE:peek>"
+    ENVIRONMENT "${PEEK_TEST_ENV};PEEK_TEST_EXECUTABLE=$<TARGET_FILE:peek>;LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp"
     TIMEOUT 90
 )
 

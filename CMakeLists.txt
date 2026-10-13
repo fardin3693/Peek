@@ -19,6 +19,7 @@ endif()
 option(PEEK_ENABLE_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(PEEK_BUILD_TESTS "Build and register tests" ON)
 option(PEEK_WITH_PDF "Enable PDF first-page preview via the Poppler C++ API" ON)
+option(PEEK_WITH_MULTIMEDIA "Enable video preview via Qt Multimedia" ON)
 
 # Optional PDF backend: Poppler ships no CMake config, so probe it through
 # pkg-config (a CMake module, not a new dependency). Absence only disables
@@ -44,6 +45,23 @@ endif()
 
 find_package(Qt6 6.2 REQUIRED COMPONENTS Widgets)
 
+# Optional media backend: Qt Multimedia with the Widgets video output. Absence
+# only disables the video/audio players; the extension dispatch stays compiled
+# and media files fall back to an explicit unsupported message.
+set(PEEK_HAVE_MULTIMEDIA OFF)
+if(PEEK_WITH_MULTIMEDIA)
+    find_package(Qt6 6.2 QUIET COMPONENTS Multimedia MultimediaWidgets)
+    if(TARGET Qt6::Multimedia AND TARGET Qt6::MultimediaWidgets)
+        set(PEEK_HAVE_MULTIMEDIA ON)
+        message(STATUS "Peek: video and audio preview enabled (Qt Multimedia)")
+    else()
+        message(STATUS "Peek: Qt Multimedia development files not found,"
+            " building without video and audio preview")
+    endif()
+else()
+    message(STATUS "Peek: video and audio preview disabled by PEEK_WITH_MULTIMEDIA=OFF")
+endif()
+
 qt_standard_project_setup()
 
 add_executable(peek
@@ -54,10 +72,19 @@ add_executable(peek
     src/preview_window.h
     src/text_preview.cpp
     src/text_preview.h
+    src/video_preview.cpp
+    src/video_preview.h
+    src/audio_preview.cpp
+    src/audio_preview.h
 )
 
 target_compile_definitions(peek PRIVATE PEEK_VERSION="${PROJECT_VERSION}")
 target_link_libraries(peek PRIVATE Qt6::Widgets)
+
+if(PEEK_HAVE_MULTIMEDIA)
+    target_compile_definitions(peek PRIVATE PEEK_WITH_MULTIMEDIA)
+    target_link_libraries(peek PRIVATE Qt6::Multimedia Qt6::MultimediaWidgets)
+endif()
 
 if(PEEK_HAVE_POPPLER)
     target_sources(peek PRIVATE src/pdf_preview.cpp src/pdf_preview.h)

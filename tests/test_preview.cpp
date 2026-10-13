@@ -1,6 +1,8 @@
+#include "audio_preview.h"
 #include "preview_request.h"
 #include "preview_window.h"
 #include "text_preview.h"
+#include "video_preview.h"
 
 #include <QApplication>
 #include <QDir>
@@ -12,11 +14,18 @@
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QPushButton>
+#include <QSlider>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 
 #include <array>
+
+#ifdef PEEK_WITH_MULTIMEDIA
+#include <QMediaPlayer>
+#endif
 
 #ifdef Q_OS_LINUX
 #include <sys/stat.h>
@@ -891,6 +900,478 @@ class PreviewTests : public QObject
         QVERIFY(window.isVisible());
         QTest::keyClick(&window, Qt::Key_Escape);
         QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 2000);
+    }
+
+    void videoExtension_data()
+    {
+        QTest::addColumn<QString>("fileName");
+        QTest::addColumn<bool>("isVideo");
+        QTest::newRow("mp4") << QStringLiteral("clip.mp4") << true;
+        QTest::newRow("mkv") << QStringLiteral("clip.mkv") << true;
+        QTest::newRow("webm") << QStringLiteral("clip.webm") << true;
+        QTest::newRow("mov") << QStringLiteral("clip.mov") << true;
+        QTest::newRow("avi") << QStringLiteral("clip.avi") << true;
+        QTest::newRow("m4v") << QStringLiteral("clip.m4v") << true;
+        QTest::newRow("uppercase-mp4") << QStringLiteral("CLIP.MP4") << true;
+        QTest::newRow("uppercase-mkv") << QStringLiteral("CLIP.MKV") << true;
+        QTest::newRow("uppercase-webm") << QStringLiteral("CLIP.WEBM") << true;
+        QTest::newRow("uppercase-mov") << QStringLiteral("CLIP.MOV") << true;
+        QTest::newRow("uppercase-avi") << QStringLiteral("CLIP.AVI") << true;
+        QTest::newRow("uppercase-m4v") << QStringLiteral("CLIP.M4V") << true;
+        QTest::newRow("mixed-case") << QStringLiteral("Movie.MkV") << true;
+        QTest::newRow("txt") << QStringLiteral("notes.txt") << false;
+        QTest::newRow("png") << QStringLiteral("photo.png") << false;
+        QTest::newRow("pdf") << QStringLiteral("doc.pdf") << false;
+        QTest::newRow("bin") << QStringLiteral("notes.bin") << false;
+        QTest::newRow("mp3") << QStringLiteral("sound.mp3") << false;
+        QTest::newRow("video-suffix-not-final") << QStringLiteral("clip.mp4.txt") << false;
+        QTest::newRow("no-extension") << QStringLiteral("clip") << false;
+    }
+
+    void videoExtension()
+    {
+        QFETCH(QString, fileName);
+        QFETCH(bool, isVideo);
+        QCOMPARE(isVideoFile(fileName), isVideo);
+    }
+
+#ifdef PEEK_WITH_MULTIMEDIA
+    void videoWidgetStartsPaused()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("clip.mp4"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isVideoPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+
+        auto *player = window.findChild<QMediaPlayer *>();
+        auto *playButton = window.findChild<QPushButton *>(QStringLiteral("playButton"));
+        auto *seekSlider = window.findChild<QSlider *>(QStringLiteral("seekSlider"));
+        auto *positionLabel = window.findChild<QLabel *>(QStringLiteral("positionLabel"));
+        QVERIFY(player != nullptr);
+        QVERIFY(playButton != nullptr);
+        QVERIFY(seekSlider != nullptr);
+        QVERIFY(positionLabel != nullptr);
+        // Starts paused: constructed but never told to play.
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+        QCOMPARE(playButton->text(), QStringLiteral("Play"));
+
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+        QVERIFY2(window.width() <= 1024, "Video preview must respect the window width cap.");
+        QVERIFY2(window.height() <= 768, "Video preview must respect the window height cap.");
+        // Safe cleanup: closing stops the player and the window destroys its
+        // children without crashing.
+        QVERIFY(window.close());
+    }
+
+    void videoInvalidFile()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("broken.mp4"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray garbage("this is not video data at all");
+        QVERIFY(file.write(garbage) == garbage.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        // Invalid media stays on the video path with a message: no crash, no
+        // image, no text view.
+        QVERIFY(window.isVideoPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("video"), Qt::CaseInsensitive));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+        QVERIFY(window.close());
+    }
+
+    void videoRealFileSurvivesPlayback()
+    {
+        const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+        if (ffmpeg.isEmpty()) {
+            QSKIP("ffmpeg is not on PATH; cannot synthesize a tiny video fixture.");
+        }
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("tiny.mp4"));
+        QProcess generator;
+        generator.setProgram(ffmpeg);
+        generator.setArguments({QStringLiteral("-y"), QStringLiteral("-v"), QStringLiteral("error"),
+                                QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+                                QStringLiteral("testsrc=size=64x48:rate=10:duration=1"),
+                                QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+                                QStringLiteral("-c:v"), QStringLiteral("mpeg4"), path});
+        generator.start();
+        if (!generator.waitForFinished(15000) || generator.exitCode() != 0 ||
+            !QFileInfo(path).isFile() || QFileInfo(path).size() == 0) {
+            QSKIP("ffmpeg could not synthesize the tiny video fixture here.");
+        }
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isVideoPreview());
+        auto *player = window.findChild<QMediaPlayer *>();
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(player != nullptr);
+        QVERIFY(status != nullptr);
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+        window.show();
+        QCoreApplication::processEvents();
+        // Give the backend a bounded moment to report a duration or an error;
+        // either outcome is acceptable, the window must simply survive.
+        for (int i = 0; i < 60; ++i) {
+            QCoreApplication::processEvents();
+            if (player->duration() > 0 || status->text().contains(QStringLiteral("Could not"))) {
+                break;
+            }
+            QTest::qWait(50);
+        }
+        QVERIFY(window.isVisible());
+        QVERIFY(window.isVideoPreview());
+        QVERIFY(status->text().contains(QStringLiteral("video"), Qt::CaseInsensitive));
+    }
+
+    void videoEscapeClosesWindow()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("escape.mp4"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isVideoPreview());
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&window, 3000));
+        QVERIFY(window.isVisible());
+        QTest::keyClick(&window, Qt::Key_Escape);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 2000);
+    }
+
+    void audioExtension_data()
+    {
+        QTest::addColumn<QString>("fileName");
+        QTest::addColumn<bool>("isAudio");
+        QTest::newRow("mp3") << QStringLiteral("sound.mp3") << true;
+        QTest::newRow("wav") << QStringLiteral("sound.wav") << true;
+        QTest::newRow("flac") << QStringLiteral("sound.flac") << true;
+        QTest::newRow("ogg") << QStringLiteral("sound.ogg") << true;
+        QTest::newRow("opus") << QStringLiteral("sound.opus") << true;
+        QTest::newRow("m4a") << QStringLiteral("sound.m4a") << true;
+        QTest::newRow("aac") << QStringLiteral("sound.aac") << true;
+        QTest::newRow("wma") << QStringLiteral("sound.wma") << true;
+        QTest::newRow("uppercase-mp3") << QStringLiteral("SOUND.MP3") << true;
+        QTest::newRow("uppercase-wav") << QStringLiteral("SOUND.WAV") << true;
+        QTest::newRow("uppercase-flac") << QStringLiteral("SOUND.FLAC") << true;
+        QTest::newRow("uppercase-ogg") << QStringLiteral("SOUND.OGG") << true;
+        QTest::newRow("uppercase-opus") << QStringLiteral("SOUND.OPUS") << true;
+        QTest::newRow("uppercase-m4a") << QStringLiteral("SOUND.M4A") << true;
+        QTest::newRow("uppercase-aac") << QStringLiteral("SOUND.AAC") << true;
+        QTest::newRow("uppercase-wma") << QStringLiteral("SOUND.WMA") << true;
+        QTest::newRow("mixed-case") << QStringLiteral("Sound.FlAc") << true;
+        QTest::newRow("txt") << QStringLiteral("notes.txt") << false;
+        QTest::newRow("png") << QStringLiteral("photo.png") << false;
+        QTest::newRow("pdf") << QStringLiteral("doc.pdf") << false;
+        QTest::newRow("bin") << QStringLiteral("notes.bin") << false;
+        QTest::newRow("mp4") << QStringLiteral("clip.mp4") << false;
+        QTest::newRow("m4v") << QStringLiteral("clip.m4v") << false;
+        QTest::newRow("audio-suffix-not-final") << QStringLiteral("sound.mp3.txt") << false;
+        QTest::newRow("no-extension") << QStringLiteral("sound") << false;
+    }
+
+    void audioExtension()
+    {
+        QFETCH(QString, fileName);
+        QFETCH(bool, isAudio);
+        QCOMPARE(isAudioFile(fileName), isAudio);
+    }
+
+    void audioWidgetStartsPaused()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("clip.wav"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isAudioPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isVideoPreview());
+
+        auto *player = window.findChild<QMediaPlayer *>();
+        auto *playButton = window.findChild<QPushButton *>(QStringLiteral("playButton"));
+        auto *seekSlider = window.findChild<QSlider *>(QStringLiteral("seekSlider"));
+        auto *positionLabel = window.findChild<QLabel *>(QStringLiteral("positionLabel"));
+        auto *audioLabel = window.findChild<QLabel *>(QStringLiteral("audioLabel"));
+        QVERIFY(player != nullptr);
+        QVERIFY(playButton != nullptr);
+        QVERIFY(seekSlider != nullptr);
+        QVERIFY(positionLabel != nullptr);
+        QVERIFY(audioLabel != nullptr);
+        // Starts paused: constructed but never told to play.
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+        QCOMPARE(playButton->text(), QStringLiteral("Play"));
+        QVERIFY(window.windowTitle().contains(QStringLiteral("clip.wav")));
+
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+        QVERIFY2(window.width() <= 1024, "Audio preview must respect the window width cap.");
+        QVERIFY2(window.height() <= 768, "Audio preview must respect the window height cap.");
+        // Safe cleanup: closing stops the player and the window destroys its
+        // children without crashing.
+        QVERIFY(window.close());
+    }
+
+    void audioInvalidFile()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("broken.mp3"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray garbage("this is not audio data at all");
+        QVERIFY(file.write(garbage) == garbage.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        // Invalid media stays on the audio path with a message: no crash, no
+        // image, no text, no video widget.
+        QVERIFY(window.isAudioPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isVideoPreview());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("audio"), Qt::CaseInsensitive));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+        QVERIFY(window.close());
+    }
+
+    void audioRealFileSurvivesPlayback()
+    {
+        const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+        if (ffmpeg.isEmpty()) {
+            QSKIP("ffmpeg is not on PATH; cannot synthesize a tiny audio fixture.");
+        }
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("tiny.wav"));
+        QProcess generator;
+        generator.setProgram(ffmpeg);
+        generator.setArguments({QStringLiteral("-y"), QStringLiteral("-v"), QStringLiteral("error"),
+                                QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+                                QStringLiteral("sine=frequency=440:duration=1"),
+                                QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"), path});
+        generator.start();
+        if (!generator.waitForFinished(15000) || generator.exitCode() != 0 ||
+            !QFileInfo(path).isFile() || QFileInfo(path).size() == 0) {
+            QSKIP("ffmpeg could not synthesize the tiny audio fixture here.");
+        }
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isAudioPreview());
+        auto *player = window.findChild<QMediaPlayer *>();
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(player != nullptr);
+        QVERIFY(status != nullptr);
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+        window.show();
+        QCoreApplication::processEvents();
+        // Give the backend a bounded moment to report a duration or an error;
+        // either outcome is acceptable, the window must simply survive.
+        for (int i = 0; i < 60; ++i) {
+            QCoreApplication::processEvents();
+            if (player->duration() > 0 || status->text().contains(QStringLiteral("Could not"))) {
+                break;
+            }
+            QTest::qWait(50);
+        }
+        QVERIFY(window.isVisible());
+        QVERIFY(window.isAudioPreview());
+        QVERIFY(status->text().contains(QStringLiteral("audio"), Qt::CaseInsensitive));
+    }
+
+    void audioEscapeClosesWindow()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("escape.ogg"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isAudioPreview());
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&window, 3000));
+        QVERIFY(window.isVisible());
+        QTest::keyClick(&window, Qt::Key_Escape);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 2000);
+    }
+
+    void audioVideoRepeatedPreviews()
+    {
+        // Audio and video players are independent instances: opening and
+        // closing one must not disturb the other, in either order.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString audioPath = fixtures.filePath(QStringLiteral("clip.wav"));
+        const QString videoPath = fixtures.filePath(QStringLiteral("clip.mp4"));
+        for (const QString &path : {audioPath, videoPath}) {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.close();
+        }
+
+        const auto audioResult = validatePreviewPath(audioPath);
+        QVERIFY2(audioResult.error.isEmpty(), qPrintable(audioResult.error));
+        PreviewWindow firstAudio(audioResult.request);
+        QVERIFY(firstAudio.isAudioPreview());
+        QVERIFY(!firstAudio.isVideoPreview());
+        firstAudio.show();
+        QCoreApplication::processEvents();
+        QVERIFY(firstAudio.isVisible());
+        QVERIFY(firstAudio.close());
+
+        const auto videoResult = validatePreviewPath(videoPath);
+        QVERIFY2(videoResult.error.isEmpty(), qPrintable(videoResult.error));
+        PreviewWindow video(videoResult.request);
+        QVERIFY(video.isVideoPreview());
+        QVERIFY(!video.isAudioPreview());
+        video.show();
+        QCoreApplication::processEvents();
+        QVERIFY(video.isVisible());
+        QVERIFY(video.close());
+
+        PreviewWindow secondAudio(audioResult.request);
+        QVERIFY(secondAudio.isAudioPreview());
+        QVERIFY(!secondAudio.isVideoPreview());
+        secondAudio.show();
+        QCoreApplication::processEvents();
+        QVERIFY(secondAudio.isVisible());
+        QVERIFY(secondAudio.close());
+    }
+#endif
+
+    void audioLeavesOtherPreviews()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString textPath = fixtures.filePath(QStringLiteral("notes.txt"));
+        QFile textFile(textPath);
+        QVERIFY(textFile.open(QIODevice::WriteOnly));
+        const QByteArray words("still text\n");
+        QVERIFY(textFile.write(words) == words.size());
+        textFile.close();
+        const QString imagePath = fixtures.filePath(QStringLiteral("photo.png"));
+        QVERIFY(writeTestImage(imagePath, QSize(64, 48), "png"));
+
+        const auto textResult = validatePreviewPath(textPath);
+        QVERIFY2(textResult.error.isEmpty(), qPrintable(textResult.error));
+        PreviewWindow textWindow(textResult.request);
+        QVERIFY(textWindow.isTextPreview());
+#ifdef PEEK_WITH_MULTIMEDIA
+        QVERIFY(!textWindow.isAudioPreview());
+#endif
+
+        const auto imageResult = validatePreviewPath(imagePath);
+        QVERIFY2(imageResult.error.isEmpty(), qPrintable(imageResult.error));
+        PreviewWindow imageWindow(imageResult.request);
+        QVERIFY(imageWindow.isImagePreview());
+#ifdef PEEK_WITH_MULTIMEDIA
+        QVERIFY(!imageWindow.isAudioPreview());
+#endif
+
+        // Audio extensions never resolve as text, image, or video fixtures
+        // and vice versa.
+        QVERIFY(!isAudioFile(textPath));
+        QVERIFY(!isAudioFile(imagePath));
+        QVERIFY(!isAudioFile(fixtures.filePath(QStringLiteral("clip.mp4"))));
+        QVERIFY(!isVideoFile(fixtures.filePath(QStringLiteral("sound.mp3"))));
+        QVERIFY(!isTextFile(fixtures.filePath(QStringLiteral("sound.wav"))));
+    }
+
+    void videoLeavesOtherPreviews()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString textPath = fixtures.filePath(QStringLiteral("notes.txt"));
+        QFile textFile(textPath);
+        QVERIFY(textFile.open(QIODevice::WriteOnly));
+        const QByteArray words("still text\n");
+        QVERIFY(textFile.write(words) == words.size());
+        textFile.close();
+        const QString imagePath = fixtures.filePath(QStringLiteral("photo.png"));
+        QVERIFY(writeTestImage(imagePath, QSize(64, 48), "png"));
+
+        const auto textResult = validatePreviewPath(textPath);
+        QVERIFY2(textResult.error.isEmpty(), qPrintable(textResult.error));
+        PreviewWindow textWindow(textResult.request);
+        QVERIFY(textWindow.isTextPreview());
+        QVERIFY(!textWindow.isVideoPreview());
+
+        const auto imageResult = validatePreviewPath(imagePath);
+        QVERIFY2(imageResult.error.isEmpty(), qPrintable(imageResult.error));
+        PreviewWindow imageWindow(imageResult.request);
+        QVERIFY(imageWindow.isImagePreview());
+        QVERIFY(!imageWindow.isVideoPreview());
+
+        // Video extensions never resolve as text or image fixtures and vice
+        // versa.
+        QVERIFY(!isVideoFile(textPath));
+        QVERIFY(!isVideoFile(imagePath));
+        QVERIFY(!isTextFile(fixtures.filePath(QStringLiteral("clip.mp4"))));
     }
 
     void pdfInvalidFallback()
