@@ -138,9 +138,9 @@ suites; tests never invoke your real notification service or change GUI config.
 
 ### Terminal diagnostics on this checkout
 
-This bypasses the menu to isolate the bridge from Nautilus. Image files now
-render in the native preview; other files show the fallback message and
-directories the placeholder. Dismiss with Escape or ordinary close:
+This bypasses the menu to isolate the bridge from Nautilus. Image, PDF, text,
+video, and audio files render in the native preview; other files show the
+fallback message and directories the placeholder. Dismiss with Escape or ordinary close:
 
 ```sh
 env PEEK_EXECUTABLE=/home/fardin/Projects/Peek/build/debug/peek \

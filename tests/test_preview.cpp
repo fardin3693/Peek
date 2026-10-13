@@ -1,7 +1,9 @@
 #include "audio_preview.h"
+#include "image_provider.h"
 #include "preview_request.h"
 #include "preview_window.h"
 #include "text_preview.h"
+#include "text_provider.h"
 #include "video_preview.h"
 
 #include <QApplication>
@@ -24,7 +26,12 @@
 #include <array>
 
 #ifdef PEEK_WITH_MULTIMEDIA
+#include "audio_provider.h"
 #include <QMediaPlayer>
+#endif
+
+#ifdef PEEK_WITH_PDF
+#include "pdf_provider.h"
 #endif
 
 #ifdef Q_OS_LINUX
@@ -101,10 +108,10 @@ bool writeTestImage(const QString &path, const QSize &size, const char *format)
     return image.save(path, format);
 }
 
-#ifdef PEEK_WITH_PDF
 // Assembles a minimal deterministic single-page PDF in memory: catalog,
 // page tree, one Helvetica page, and a correct cross-reference table with
 // computed offsets. No external producer or downloaded fixture needed.
+// Pure Qt (no Poppler), so both PEEK_WITH_PDF and no-PDF builds use it.
 QByteArray buildMinimalPdf()
 {
     const QByteArray stream("BT /F1 24 Tf 72 720 Td (Hello Peek) Tj ET");
@@ -134,7 +141,6 @@ QByteArray buildMinimalPdf()
            QByteArray("\n%%EOF\n");
     return pdf;
 }
-#endif
 
 QString inputPath(const QString &absolutePath, bool isRelative)
 {
@@ -902,6 +908,310 @@ class PreviewTests : public QObject
         QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 2000);
     }
 
+    void textProviderSupports_data()
+    {
+        QTest::addColumn<QString>("fileName");
+        QTest::addColumn<bool>("supported");
+        QTest::newRow("txt") << QStringLiteral("notes.txt") << true;
+        QTest::newRow("markdown") << QStringLiteral("notes.markdown") << true;
+        QTest::newRow("uppercase-txt") << QStringLiteral("NOTES.TXT") << true;
+        QTest::newRow("mixed-case") << QStringLiteral("Notes.Md") << true;
+        QTest::newRow("source") << QStringLiteral("main.cpp") << true;
+        QTest::newRow("script") << QStringLiteral("run.py") << true;
+        QTest::newRow("config") << QStringLiteral("data.json") << true;
+        QTest::newRow("log") << QStringLiteral("server.LOG") << true;
+        QTest::newRow("png") << QStringLiteral("photo.png") << false;
+        QTest::newRow("pdf") << QStringLiteral("doc.pdf") << false;
+        QTest::newRow("mp3") << QStringLiteral("sound.mp3") << false;
+        QTest::newRow("mp4") << QStringLiteral("clip.mp4") << false;
+        QTest::newRow("bin") << QStringLiteral("notes.bin") << false;
+        QTest::newRow("no-extension") << QStringLiteral("notes") << false;
+        QTest::newRow("text-suffix-not-final") << QStringLiteral("notes.txt.png") << false;
+    }
+
+    void textProviderSupports()
+    {
+        QFETCH(QString, fileName);
+        QFETCH(bool, supported);
+        const auto expected = supported ? ProviderSupport::Yes : ProviderSupport::No;
+        QCOMPARE(textProvider().supports(fileName), expected);
+        QCOMPARE(::textProviderSupports(fileName), expected);
+    }
+
+    void textProviderRenderNullGuards()
+    {
+        // Null widgets must not crash: render refuses safely.
+        QCOMPARE(textProvider().render(QStringLiteral("notes.txt"), nullptr, nullptr), false);
+    }
+
+    void textProviderRendersContent()
+    {
+        QCOMPARE(QLatin1String(textProvider().name), QLatin1String("text"));
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("provider.txt"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray contents("provider renders\n");
+        QVERIFY(file.write(contents) == contents.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isTextPreview());
+        auto *textView = window.findChild<QPlainTextEdit *>(QStringLiteral("textView"));
+        QVERIFY(textView != nullptr);
+        QVERIFY(textView->isReadOnly());
+        QCOMPARE(textView->toPlainText(), QString::fromUtf8(contents));
+    }
+
+    void textProviderEmptyFileRenders()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("empty.txt"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isTextPreview());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("empty")));
+    }
+
+    void textProviderFailureKeepsClaim()
+    {
+        // Invalid text stays claimed: status message, no text view, and no
+        // fall-through to the image path.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("binary.txt"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray contents("hello\x00world\n", 12);
+        QVERIFY(file.write(contents) == contents.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("Could not load a text preview")));
+    }
+
+    void textProviderLeavesOthersAlone()
+    {
+        // Non-text extensions never claim the text provider, so images and
+        // unknown binaries still reach their existing paths.
+        QCOMPARE(textProvider().supports(QStringLiteral("photo.png")), ProviderSupport::No);
+        QCOMPARE(textProvider().supports(QStringLiteral("notes.bin")), ProviderSupport::No);
+
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString imagePath = fixtures.filePath(QStringLiteral("tiny.png"));
+        QVERIFY(writeTestImage(imagePath, QSize(8, 8), "PNG"));
+        const auto imageResult = validatePreviewPath(imagePath);
+        QVERIFY2(imageResult.error.isEmpty(), qPrintable(imageResult.error));
+        {
+            PreviewWindow window(imageResult.request);
+            QVERIFY(window.isImagePreview());
+            QVERIFY(!window.isTextPreview());
+        }
+
+        const QString unknownPath = fixtures.filePath(QStringLiteral("mystery.zzz"));
+        QFile unknown(unknownPath);
+        QVERIFY(unknown.open(QIODevice::WriteOnly));
+        const QByteArray garbage("not a supported file");
+        QVERIFY(unknown.write(garbage) == garbage.size());
+        unknown.close();
+        const auto unknownResult = validatePreviewPath(unknownPath);
+        QVERIFY2(unknownResult.error.isEmpty(), qPrintable(unknownResult.error));
+        {
+            PreviewWindow window(unknownResult.request);
+            QVERIFY(!window.isTextPreview());
+            QVERIFY(!window.isImagePreview());
+            QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+            auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+            QVERIFY(status != nullptr);
+            QCOMPARE(status->textFormat(), Qt::PlainText);
+            QVERIFY(!status->text().isEmpty());
+            QVERIFY(status->text().contains(QStringLiteral("image preview")));
+        }
+    }
+
+    void imageProviderSupports_data()
+    {
+        QTest::addColumn<QString>("fileName");
+        QTest::addColumn<bool>("supported");
+        QTest::newRow("png") << QStringLiteral("photo.png") << true;
+        QTest::newRow("jpg") << QStringLiteral("photo.jpg") << true;
+        QTest::newRow("jpeg") << QStringLiteral("photo.jpeg") << true;
+        QTest::newRow("webp") << QStringLiteral("photo.webp") << true;
+        QTest::newRow("bmp") << QStringLiteral("photo.bmp") << true;
+        QTest::newRow("gif") << QStringLiteral("photo.gif") << true;
+        QTest::newRow("uppercase-png") << QStringLiteral("PHOTO.PNG") << true;
+        QTest::newRow("uppercase-jpg") << QStringLiteral("PHOTO.JPG") << true;
+        QTest::newRow("mixed-case") << QStringLiteral("Photo.PnG") << true;
+        QTest::newRow("mixed-case-jpeg") << QStringLiteral("Photo.JpEg") << true;
+        QTest::newRow("txt") << QStringLiteral("notes.txt") << false;
+        QTest::newRow("pdf") << QStringLiteral("doc.pdf") << false;
+        QTest::newRow("mp3") << QStringLiteral("sound.mp3") << false;
+        QTest::newRow("mp4") << QStringLiteral("clip.mp4") << false;
+        QTest::newRow("bin") << QStringLiteral("notes.bin") << false;
+        QTest::newRow("no-extension") << QStringLiteral("photo") << false;
+        QTest::newRow("image-suffix-not-final") << QStringLiteral("photo.png.txt") << false;
+        QTest::newRow("text-suffix-image") << QStringLiteral("notes.txt.png") << true;
+    }
+
+    void imageProviderSupports()
+    {
+        QFETCH(QString, fileName);
+        QFETCH(bool, supported);
+        const auto expected = supported ? ProviderSupport::Yes : ProviderSupport::No;
+        QCOMPARE(imageProvider().supports(fileName), expected);
+        QCOMPARE(::imageProviderSupports(fileName), expected);
+    }
+
+    void imageProviderSupportsIsCheap()
+    {
+        // Identification is extension-only: missing or unreadable files with
+        // an image suffix are still claimed, proving no decode happens in
+        // supports().
+        QCOMPARE(imageProvider().supports(QStringLiteral("/nonexistent/photo.PNG")),
+                 ProviderSupport::Yes);
+        QCOMPARE(imageProvider().supports(QStringLiteral("/nonexistent/notes.txt")),
+                 ProviderSupport::No);
+        QCOMPARE(imageProvider().supports(QStringLiteral("photo.png.txt")), ProviderSupport::No);
+    }
+
+    void imageProviderRenderNullGuards()
+    {
+        // Null widgets must not crash: render refuses safely.
+        QCOMPARE(imageProvider().render(QStringLiteral("photo.png"), nullptr, nullptr), false);
+    }
+
+    void imageProviderRendersContent()
+    {
+        QCOMPARE(QLatin1String(imageProvider().name), QLatin1String("image"));
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("provider.png"));
+        QVERIFY(writeTestImage(path, QSize(64, 48), "png"));
+        QCOMPARE(imageProvider().supports(path), ProviderSupport::Yes);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QCOMPARE(window.originalImageSize(), QSize(64, 48));
+        auto *image = window.findChild<QLabel *>(QStringLiteral("imageLabel"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(image != nullptr);
+        QVERIFY(status != nullptr);
+        QCOMPARE(image->alignment(), Qt::AlignCenter);
+        QVERIFY(image->minimumSize().width() >= 160);
+        QVERIFY(image->minimumSize().height() >= 120);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("64 × 48")));
+        QVERIFY(status->text().contains(QStringLiteral("px")));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(!window.findChild<QLabel *>(QStringLiteral("imageLabel"))->pixmap().isNull());
+    }
+
+    void imageProviderFailureKeepsClaim()
+    {
+        // A recognized but corrupt image stays claimed: the image status
+        // message stands, no view is created, and nothing falls through to
+        // text or the generic path with a misleading message.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("broken.png"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray garbage("this is not image data at all");
+        QVERIFY(file.write(garbage) == garbage.size());
+        file.close();
+        QCOMPARE(imageProvider().supports(path), ProviderSupport::Yes);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("Could not load an image preview")));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+    }
+
+    void imageProviderLeavesOthersAlone()
+    {
+        // Non-image extensions never claim the image provider, so text and
+        // unknown binaries still reach their existing paths.
+        QCOMPARE(imageProvider().supports(QStringLiteral("notes.txt")), ProviderSupport::No);
+        QCOMPARE(imageProvider().supports(QStringLiteral("notes.bin")), ProviderSupport::No);
+        QCOMPARE(imageProvider().supports(QStringLiteral("photo.png.txt")), ProviderSupport::No);
+        QCOMPARE(imageProvider().supports(QStringLiteral("clip.mp4")), ProviderSupport::No);
+        QCOMPARE(imageProvider().supports(QStringLiteral("sound.mp3")), ProviderSupport::No);
+
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString textPath = fixtures.filePath(QStringLiteral("notes.txt"));
+        QFile textFile(textPath);
+        QVERIFY(textFile.open(QIODevice::WriteOnly));
+        const QByteArray words("still text\n");
+        QVERIFY(textFile.write(words) == words.size());
+        textFile.close();
+        const auto textResult = validatePreviewPath(textPath);
+        QVERIFY2(textResult.error.isEmpty(), qPrintable(textResult.error));
+        {
+            PreviewWindow window(textResult.request);
+            QVERIFY(window.isTextPreview());
+            QVERIFY(!window.isImagePreview());
+        }
+
+        const QString unknownPath = fixtures.filePath(QStringLiteral("mystery.zzz"));
+        QFile unknown(unknownPath);
+        QVERIFY(unknown.open(QIODevice::WriteOnly));
+        const QByteArray garbage("not a supported file");
+        QVERIFY(unknown.write(garbage) == garbage.size());
+        unknown.close();
+        QCOMPARE(imageProvider().supports(unknownPath), ProviderSupport::No);
+        const auto unknownResult = validatePreviewPath(unknownPath);
+        QVERIFY2(unknownResult.error.isEmpty(), qPrintable(unknownResult.error));
+        {
+            PreviewWindow window(unknownResult.request);
+            QVERIFY(!window.isTextPreview());
+            QVERIFY(!window.isImagePreview());
+            auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+            QVERIFY(status != nullptr);
+            QCOMPARE(status->text(),
+                     QStringLiteral("No image preview is available for this file."));
+        }
+    }
+
     void videoExtension_data()
     {
         QTest::addColumn<QString>("fileName");
@@ -1302,6 +1612,232 @@ class PreviewTests : public QObject
         QVERIFY(secondAudio.isVisible());
         QVERIFY(secondAudio.close());
     }
+
+    void audioProviderSupports_data()
+    {
+        QTest::addColumn<QString>("fileName");
+        QTest::addColumn<bool>("supported");
+        QTest::newRow("mp3") << QStringLiteral("sound.mp3") << true;
+        QTest::newRow("wav") << QStringLiteral("sound.wav") << true;
+        QTest::newRow("flac") << QStringLiteral("sound.flac") << true;
+        QTest::newRow("ogg") << QStringLiteral("sound.ogg") << true;
+        QTest::newRow("opus") << QStringLiteral("sound.opus") << true;
+        QTest::newRow("m4a") << QStringLiteral("sound.m4a") << true;
+        QTest::newRow("aac") << QStringLiteral("sound.aac") << true;
+        QTest::newRow("wma") << QStringLiteral("sound.wma") << true;
+        QTest::newRow("uppercase-mp3") << QStringLiteral("SOUND.MP3") << true;
+        QTest::newRow("uppercase-wav") << QStringLiteral("SOUND.WAV") << true;
+        QTest::newRow("uppercase-flac") << QStringLiteral("SOUND.FLAC") << true;
+        QTest::newRow("uppercase-ogg") << QStringLiteral("SOUND.OGG") << true;
+        QTest::newRow("uppercase-opus") << QStringLiteral("SOUND.OPUS") << true;
+        QTest::newRow("uppercase-m4a") << QStringLiteral("SOUND.M4A") << true;
+        QTest::newRow("uppercase-aac") << QStringLiteral("SOUND.AAC") << true;
+        QTest::newRow("uppercase-wma") << QStringLiteral("SOUND.WMA") << true;
+        QTest::newRow("mixed-case") << QStringLiteral("Sound.FlAc") << true;
+        QTest::newRow("mixed-case-m4a") << QStringLiteral("Sound.M4A") << true;
+        QTest::newRow("txt") << QStringLiteral("notes.txt") << false;
+        QTest::newRow("png") << QStringLiteral("photo.png") << false;
+        QTest::newRow("pdf") << QStringLiteral("doc.pdf") << false;
+        QTest::newRow("bin") << QStringLiteral("notes.bin") << false;
+        QTest::newRow("mp4") << QStringLiteral("clip.mp4") << false;
+        QTest::newRow("m4v") << QStringLiteral("clip.m4v") << false;
+        QTest::newRow("mkv") << QStringLiteral("clip.mkv") << false;
+        QTest::newRow("audio-suffix-not-final") << QStringLiteral("sound.mp3.txt") << false;
+        QTest::newRow("no-extension") << QStringLiteral("sound") << false;
+    }
+
+    void audioProviderSupports()
+    {
+        QFETCH(QString, fileName);
+        QFETCH(bool, supported);
+        const auto expected = supported ? ProviderSupport::Yes : ProviderSupport::No;
+        QCOMPARE(audioProvider().supports(fileName), expected);
+        QCOMPARE(::audioProviderSupports(fileName), expected);
+    }
+
+    void audioProviderSupportsIsCheap()
+    {
+        // Identification is extension-only: missing or unreadable files with
+        // an audio suffix are still claimed, proving no player is opened and
+        // no audio is decoded in supports().
+        QCOMPARE(audioProvider().supports(QStringLiteral("/nonexistent/sound.MP3")),
+                 ProviderSupport::Yes);
+        QCOMPARE(audioProvider().supports(QStringLiteral("/nonexistent/notes.txt")),
+                 ProviderSupport::No);
+        QCOMPARE(audioProvider().supports(QStringLiteral("sound.mp3.txt")), ProviderSupport::No);
+        // Audio/video extension sets are disjoint (m4a vs m4v).
+        QCOMPARE(audioProvider().supports(QStringLiteral("clip.m4v")), ProviderSupport::No);
+        QVERIFY(!isVideoFile(QStringLiteral("sound.m4a")));
+    }
+
+    void audioProviderRenderNullGuards()
+    {
+        // Null widgets must not crash: render refuses safely.
+        QCOMPARE(audioProvider().render(QStringLiteral("sound.mp3"), nullptr, nullptr), false);
+    }
+
+    void audioProviderRendersContent()
+    {
+        QCOMPARE(QLatin1String(audioProvider().name), QLatin1String("audio"));
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("provider.wav"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        QCOMPARE(audioProvider().supports(path), ProviderSupport::Yes);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isAudioPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isVideoPreview());
+
+        auto *player = window.findChild<QMediaPlayer *>();
+        auto *playButton = window.findChild<QPushButton *>(QStringLiteral("playButton"));
+        auto *seekSlider = window.findChild<QSlider *>(QStringLiteral("seekSlider"));
+        auto *positionLabel = window.findChild<QLabel *>(QStringLiteral("positionLabel"));
+        auto *audioLabel = window.findChild<QLabel *>(QStringLiteral("audioLabel"));
+        auto *controls = window.findChild<QWidget *>(QStringLiteral("audioControls"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(player != nullptr);
+        QVERIFY(playButton != nullptr);
+        QVERIFY(seekSlider != nullptr);
+        QVERIFY(positionLabel != nullptr);
+        QVERIFY(audioLabel != nullptr);
+        QVERIFY(controls != nullptr);
+        QVERIFY(status != nullptr);
+        // Initial playback state: paused, never told to play.
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+        QCOMPARE(playButton->text(), QStringLiteral("Play"));
+        QCOMPARE(seekSlider->minimum(), 0);
+        QCOMPARE(seekSlider->maximum(), 0);
+        QCOMPARE(positionLabel->text(), QStringLiteral("0:00 / 0:00"));
+        QCOMPARE(positionLabel->textFormat(), Qt::PlainText);
+        QCOMPARE(audioLabel->text(), QStringLiteral("Audio preview"));
+        QCOMPARE(audioLabel->textFormat(), Qt::PlainText);
+        QCOMPARE(audioLabel->alignment(), Qt::AlignCenter);
+        QVERIFY(audioLabel->minimumSize().width() >= 160);
+        QVERIFY(audioLabel->minimumSize().height() >= 120);
+        QCOMPARE(status->text(), QStringLiteral("Audio preview — paused."));
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+        QVERIFY2(window.width() <= 1024, "Audio preview must respect the window width cap.");
+        QVERIFY2(window.height() <= 768, "Audio preview must respect the window height cap.");
+        QVERIFY(window.close());
+    }
+
+    void audioProviderFailureKeepsClaim()
+    {
+        // A recognized but unplayable audio file stays claimed: the audio
+        // status line stands, controls stay in place, and nothing falls
+        // through to image, text, video, or the generic fallback.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("broken.mp3"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray garbage("this is not audio data at all");
+        QVERIFY(file.write(garbage) == garbage.size());
+        file.close();
+        QCOMPARE(audioProvider().supports(path), ProviderSupport::Yes);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isAudioPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isVideoPreview());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        QVERIFY(window.findChild<QWidget *>(QStringLiteral("videoControls")) == nullptr);
+        // Controls stay in place so the failure never swaps in another preview.
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("playButton")) != nullptr);
+        QVERIFY(window.findChild<QSlider *>(QStringLiteral("seekSlider")) != nullptr);
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("audioLabel")) != nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("audio"), Qt::CaseInsensitive));
+        QVERIFY(status->text() != QStringLiteral("No image preview is available for this file."));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+        QVERIFY(window.close());
+    }
+
+    void audioProviderLeavesOthersAlone()
+    {
+        // Non-audio extensions never claim the audio provider, so text,
+        // images, video, and unknown binaries still reach their paths.
+        QCOMPARE(audioProvider().supports(QStringLiteral("notes.txt")), ProviderSupport::No);
+        QCOMPARE(audioProvider().supports(QStringLiteral("photo.png")), ProviderSupport::No);
+        QCOMPARE(audioProvider().supports(QStringLiteral("clip.mp4")), ProviderSupport::No);
+        QCOMPARE(audioProvider().supports(QStringLiteral("clip.m4v")), ProviderSupport::No);
+        QCOMPARE(audioProvider().supports(QStringLiteral("notes.bin")), ProviderSupport::No);
+        QCOMPARE(audioProvider().supports(QStringLiteral("sound.mp3.txt")), ProviderSupport::No);
+
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString textPath = fixtures.filePath(QStringLiteral("notes.txt"));
+        QFile textFile(textPath);
+        QVERIFY(textFile.open(QIODevice::WriteOnly));
+        const QByteArray words("still text\n");
+        QVERIFY(textFile.write(words) == words.size());
+        textFile.close();
+        const auto textResult = validatePreviewPath(textPath);
+        QVERIFY2(textResult.error.isEmpty(), qPrintable(textResult.error));
+        {
+            PreviewWindow window(textResult.request);
+            QVERIFY(window.isTextPreview());
+            QVERIFY(!window.isAudioPreview());
+        }
+
+        const QString imagePath = fixtures.filePath(QStringLiteral("photo.png"));
+        QVERIFY(writeTestImage(imagePath, QSize(64, 48), "png"));
+        const auto imageResult = validatePreviewPath(imagePath);
+        QVERIFY2(imageResult.error.isEmpty(), qPrintable(imageResult.error));
+        {
+            PreviewWindow window(imageResult.request);
+            QVERIFY(window.isImagePreview());
+            QVERIFY(!window.isAudioPreview());
+        }
+    }
+
+    void audioRepeatedPreviews()
+    {
+        // Repeated open/close of the same audio file is safe: each window
+        // owns an independent player that stops on close/destruction.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("repeat.wav"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        for (int i = 0; i < 2; ++i) {
+            PreviewWindow window(result.request);
+            QVERIFY(window.isAudioPreview());
+            auto *player = window.findChild<QMediaPlayer *>();
+            QVERIFY(player != nullptr);
+            QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+            window.show();
+            QCoreApplication::processEvents();
+            QVERIFY(window.isVisible());
+            QVERIFY(window.close());
+        }
+    }
 #endif
 
     void audioLeavesOtherPreviews()
@@ -1341,6 +1877,45 @@ class PreviewTests : public QObject
         QVERIFY(!isVideoFile(fixtures.filePath(QStringLiteral("sound.mp3"))));
         QVERIFY(!isTextFile(fixtures.filePath(QStringLiteral("sound.wav"))));
     }
+
+#ifndef PEEK_WITH_MULTIMEDIA
+    void audioDisabledReportsUnsupported()
+    {
+        // Without the Multimedia backend audio extensions are still
+        // recognized (isAudioFile is backend-independent) but report as
+        // unsupported instead of reaching the image path with a misleading
+        // message.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("sound.MP3"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray garbage("this is not audio data at all");
+        QVERIFY(file.write(garbage) == garbage.size());
+        file.close();
+        QVERIFY(isAudioFile(path));
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isAudioPreview());
+        QVERIFY(!window.isVideoPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QCOMPARE(status->text(), QStringLiteral("No audio preview is available for this file "
+                                                "(Qt Multimedia is not installed)."));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+        QVERIFY(window.close());
+    }
+#endif
 
     void videoLeavesOtherPreviews()
     {
@@ -1431,6 +2006,222 @@ class PreviewTests : public QObject
         window.show();
         QCoreApplication::processEvents();
         QVERIFY(!window.findChild<QLabel *>(QStringLiteral("imageLabel"))->pixmap().isNull());
+    }
+#endif
+
+#ifdef PEEK_WITH_PDF
+    void pdfProviderSupports_data()
+    {
+        QTest::addColumn<QString>("fileName");
+        QTest::addColumn<bool>("withMagic");
+        QTest::addColumn<bool>("supported");
+        QTest::newRow("pdf") << QStringLiteral("doc.pdf") << true << true;
+        QTest::newRow("uppercase-pdf") << QStringLiteral("DOC.PDF") << true << true;
+        QTest::newRow("mixed-case") << QStringLiteral("Doc.PdF") << true << true;
+        QTest::newRow("no-magic") << QStringLiteral("broken.pdf") << false << false;
+        QTest::newRow("empty") << QStringLiteral("empty.pdf") << false << false;
+        QTest::newRow("magic-txt") << QStringLiteral("notes.txt") << true << false;
+        QTest::newRow("magic-png") << QStringLiteral("photo.png") << true << false;
+        QTest::newRow("mp3") << QStringLiteral("sound.mp3") << false << false;
+        QTest::newRow("mp4") << QStringLiteral("clip.mp4") << false << false;
+        QTest::newRow("bin") << QStringLiteral("notes.bin") << false << false;
+        QTest::newRow("no-extension") << QStringLiteral("document") << true << false;
+        QTest::newRow("pdf-suffix-not-final") << QStringLiteral("doc.pdf.txt") << true << false;
+    }
+
+    void pdfProviderSupports()
+    {
+        QFETCH(QString, fileName);
+        QFETCH(bool, withMagic);
+        QFETCH(bool, supported);
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(fileName);
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray contents =
+            withMagic ? buildMinimalPdf() : QByteArray("this is not a PDF document at all");
+        QVERIFY(file.write(contents) == contents.size());
+        file.close();
+
+        const auto expected = supported ? ProviderSupport::Yes : ProviderSupport::No;
+        QCOMPARE(pdfProvider().supports(path), expected);
+        QCOMPARE(::pdfProviderSupports(path), expected);
+    }
+
+    void pdfProviderSupportsUnreadable()
+    {
+        // Identification never claims what it cannot read: missing files
+        // report No instead of crashing or decoding.
+        QCOMPARE(pdfProvider().supports(QStringLiteral("/nonexistent/missing.pdf")),
+                 ProviderSupport::No);
+        QCOMPARE(::pdfProviderSupports(QStringLiteral("/nonexistent/missing.pdf")),
+                 ProviderSupport::No);
+        QCOMPARE(pdfProvider().supports(QStringLiteral("photo.png.txt")), ProviderSupport::No);
+    }
+
+    void pdfProviderRenderNullGuards()
+    {
+        // Null widgets must not crash: render refuses safely.
+        QCOMPARE(pdfProvider().render(QStringLiteral("doc.pdf"), nullptr, nullptr), false);
+    }
+
+    void pdfProviderRendersContent()
+    {
+        QCOMPARE(QLatin1String(pdfProvider().name), QLatin1String("pdf"));
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("provider.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMinimalPdf();
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+        QCOMPARE(pdfProvider().supports(path), ProviderSupport::Yes);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        auto *image = window.findChild<QLabel *>(QStringLiteral("imageLabel"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(image != nullptr);
+        QVERIFY(status != nullptr);
+        QCOMPARE(image->alignment(), Qt::AlignCenter);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("PDF document")));
+        QVERIFY(status->text().contains(QStringLiteral("page 1 of 1")));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(!window.findChild<QLabel *>(QStringLiteral("imageLabel"))->pixmap().isNull());
+    }
+
+    void pdfProviderFailureKeepsClaim()
+    {
+        // A claimed but unrendersable PDF stays claimed: the PDF status
+        // message stands, no view is created, and nothing falls through to
+        // text, image, or the generic path with a misleading message.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("corrupt.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray garbage("%PDF-1.4\nthis is not a valid page tree at all\n");
+        QVERIFY(file.write(garbage) == garbage.size());
+        file.close();
+        QCOMPARE(pdfProvider().supports(path), ProviderSupport::Yes);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("Could not load a PDF preview")));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+    }
+
+    void pdfProviderEmptyFileFallsThrough()
+    {
+        // An empty .pdf has no magic, so it is never claimed: the generic
+        // fallback stands instead of a PDF error.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("empty.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        QCOMPARE(pdfProvider().supports(path), ProviderSupport::No);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->text(), QStringLiteral("No image preview is available for this file."));
+    }
+
+    void pdfProviderLeavesOthersAlone()
+    {
+        // Non-PDF files never claim the PDF provider, so text, images, and
+        // unknown binaries still reach their existing paths.
+        QCOMPARE(pdfProvider().supports(QStringLiteral("notes.txt")), ProviderSupport::No);
+        QCOMPARE(pdfProvider().supports(QStringLiteral("photo.png")), ProviderSupport::No);
+        QCOMPARE(pdfProvider().supports(QStringLiteral("clip.mp4")), ProviderSupport::No);
+        QCOMPARE(pdfProvider().supports(QStringLiteral("sound.mp3")), ProviderSupport::No);
+        QCOMPARE(pdfProvider().supports(QStringLiteral("notes.bin")), ProviderSupport::No);
+        QCOMPARE(pdfProvider().supports(QStringLiteral("doc.pdf.txt")), ProviderSupport::No);
+
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString textPath = fixtures.filePath(QStringLiteral("notes.txt"));
+        QFile textFile(textPath);
+        QVERIFY(textFile.open(QIODevice::WriteOnly));
+        const QByteArray words("still text\n");
+        QVERIFY(textFile.write(words) == words.size());
+        textFile.close();
+        const auto textResult = validatePreviewPath(textPath);
+        QVERIFY2(textResult.error.isEmpty(), qPrintable(textResult.error));
+        {
+            PreviewWindow window(textResult.request);
+            QVERIFY(window.isTextPreview());
+            QVERIFY(!window.isImagePreview());
+        }
+
+        const QString imagePath = fixtures.filePath(QStringLiteral("photo.png"));
+        QVERIFY(writeTestImage(imagePath, QSize(64, 48), "png"));
+        const auto imageResult = validatePreviewPath(imagePath);
+        QVERIFY2(imageResult.error.isEmpty(), qPrintable(imageResult.error));
+        {
+            PreviewWindow window(imageResult.request);
+            QVERIFY(window.isImagePreview());
+            QVERIFY(!window.isTextPreview());
+        }
+    }
+#endif
+
+#ifndef PEEK_WITH_PDF
+    void pdfDisabledFallsThrough()
+    {
+        // Without the Poppler backend a valid PDF is never claimed: it falls
+        // through to the generic fallback instead of rendering or failing
+        // with a PDF error.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("minimal.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMinimalPdf();
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QCOMPARE(status->text(), QStringLiteral("No image preview is available for this file."));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
     }
 #endif
 

@@ -6,23 +6,53 @@ Target platform: Linux desktops, developed first on Omarchy (Arch Linux, Hyprlan
 
 ## Status
 
-**Milestone 2, Tasks A–B plus native image previews: placeholder window with real image rendering and minimal Nautilus selection handoff.**
+**Native previews for image, PDF, plain text, video, and audio files, plus a minimal Nautilus selection handoff.**
 
-Implemented:
+Peek is a native C++17 application built on Qt 6 Widgets (see [docs/architecture.md](docs/architecture.md)). `peek PATH` validates a local file or directory and opens one decorated preview window; Escape or the ordinary window close action dismisses it and exits Peek. With no arguments, Peek prints version/platform information and brief usage, then exits successfully. `--help` and `--version` remain available.
 
-- CMake/Qt 6 Widgets build with a `peek` executable.
-- `peek PATH` validates a local file or directory. Supported image files are decoded with Qt's `QImageReader` (with EXIF auto-transform) and shown in a native Qt window with their name, absolute path, dimensions, and format; the image scales to the window while preserving aspect ratio and updates on resize.
-- Verified by automated tests: PNG, JPEG, and WebP. Other files readable by the installed Qt image plugins are attempted through the same path; anything else shows a plain-text "No image preview is available for this file." message, and unreadable/corrupt images show "Could not load an image preview of this file (...)." instead of crashing. Large images are downscaled at decode time (longest side capped at 2048 px) and the initial window is capped at 1024×768.
-- Directories keep the placeholder ("Directory preview not implemented yet."); their contents are not scanned.
-- Escape or the ordinary window close action dismisses the window and exits Peek.
-- With no arguments, Peek prints startup information and brief usage, then exits successfully. `--help` and `--version` remain available.
-- Optional Nautilus Script reads the current selection and launches native `peek -- PATH`; right-click Scripts is a diagnostic fallback, not the final UX.
-- CTest smoke tests plus native path-validation, widget-dismissal, CLI argument/error, and Nautilus handoff tests.
-- Debug, Release and ASan/UBSan presets.
+For files, the window dispatches by extension in a fixed order — PDF, then plain text, then audio, then video, then image — and each handler owns its status message. A file claimed by one handler never falls through to an unrelated preview. Media playback streams through the Qt Multimedia backend and never loads whole files into memory.
 
-Not implemented yet: non-image file rendering (text, PDF, audio/video, archives), Hyprland shortcuts, Space-to-preview/toggle, and single-instance behavior. The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification.
+### Image
 
-Peek reads file contents only to decode images via Qt's image plugins; it does not enumerate directories in this milestone. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
+- Decoded with Qt's `QImageReader` (EXIF auto-transform). Which formats can be read depends on the installed Qt image plugins; PNG, JPEG, and WebP are covered by automated tests.
+- The window shows the file name, absolute path, dimensions, and detected format. The image scales to the window while preserving aspect ratio (`KeepAspectRatio`, `SmoothTransformation`) and updates on resize.
+- Large images are downscaled at decode time (longest side capped at 2048 px) and the initial window is capped at 1024×768.
+- Files no image plugin can read show `No image preview is available for this file.`; unreadable or corrupt images show `Could not load an image preview of this file (…).` instead of crashing.
+
+### PDF (first page only, requires the Poppler backend)
+
+- A file counts as PDF only when it has a `.pdf` suffix (case-insensitive) **and** a `%PDF-` magic header; a bare extension never suffices.
+- Renders page 1 at up to 2048 px on the longest side (DPI capped at 300). The status line reads `PDF document — page 1 of N — W × H px`.
+- Password-protected, corrupt, empty, and otherwise unreadable documents stay on the PDF status line (for example, `Could not load a PDF preview of this file (password-protected (password required)).`); they never fall through to the image preview.
+
+### Plain text
+
+- Recognized by extension only (case-insensitive): `txt md markdown json jsonl yaml yml toml csv tsv log xml html css c h cpp hpp py sh lua js ts rs`. Unknown extensions are never decoded as text.
+- Limits: at most 2 MiB (checked before reading, and the read itself is bounded so a file that grows mid-read still cannot exceed it); strict UTF-8 only; embedded NUL bytes rejected; a leading UTF-8 BOM is stripped. Empty files succeed and report `Text file — empty (N bytes)`.
+- Shown read-only in a fixed-width, horizontally scrolling view with a `Text file — L lines — B bytes` status line. Text is never interpreted as rich text or HTML, and never executed.
+
+### Video (streaming, requires the Qt Multimedia backend)
+
+- Recognized by extension only (case-insensitive): `mp4 mkv webm mov avi m4v`. Unknown extensions are never treated as video.
+- Streams through `QMediaPlayer` + `QVideoWidget` + `QAudioOutput`; never loads the whole file into memory. Starts paused with a `Video preview — paused.` status line, a Play/Pause button, a seek slider, and an `m:ss / m:ss` position indicator. Closing the window (or destroying the player) stops playback and clears the source; video and audio players are independent instances.
+- Unsupported codecs, missing backends, and invalid files stay on the video controls as `Could not play this video (…)` — never a crash, never a fallback to an unrelated preview. Actual codec support depends on the Qt FFmpeg backend at runtime.
+
+### Audio (streaming, requires the Qt Multimedia backend)
+
+- Recognized by extension only (case-insensitive): `mp3 wav flac ogg opus m4a aac wma`. Unknown extensions stay on their existing preview paths. The audio and video extension sets are disjoint (`m4a` ≠ `m4v`).
+- Same streaming `QMediaPlayer` + `QAudioOutput` backend as video but with no video output: a centered label plus Play/Pause button, seek slider, and `m:ss / m:ss` duration indicator, starting paused. Closing stops playback and clears the source. Failures stay on the audio controls as `Could not play this audio (…)`; without the backend, audio extensions report `No audio preview is available for this file (Qt Multimedia is not installed).`
+
+### Unsupported files and directories
+
+- Directories show the `Directory preview not implemented yet.` placeholder; their contents are not scanned.
+- Files matching no handler reach the image path: anything `QImageReader` cannot read shows `No image preview is available for this file.`
+- Without the Multimedia backend, media extensions are still recognized and report `No video/audio preview is available for this file (Qt Multimedia is not installed).` instead of reaching the image path with a misleading message. Without the Poppler backend, `pdf_preview.cpp` is not compiled and `.pdf` files fall through to the text/image/fallback path (see Installation).
+
+### Not yet implemented
+
+Archives, office documents, Markdown rendering, and syntax highlighting; Hyprland shortcuts, Space-to-preview/toggle, and single-instance behavior. The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification; audible PipeWire output and real-time duration readouts likewise need a Wayland-session check.
+
+Peek reads file contents only to decode the selected file for its preview (image pixels, PDF first page, text bytes, media stream); it never enumerates directories. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
 
 ## Dependencies
 
@@ -36,7 +66,23 @@ Required:
 | Qt 6 (>= 6.2) Widgets | Arch: `qt6-base` |
 | Qt 6 Wayland platform plugin | Arch: `qt6-wayland` (for native Wayland sessions) |
 
-Tests additionally require Qt 6 Test (included in Arch's `qt6-base`) and Python >= 3.9 (Arch: `python`) for the handoff suite. These are discovered only when `PEEK_BUILD_TESTS=ON` (the default). To build the native application without tests or a Python requirement, configure with `-DPEEK_BUILD_TESTS=OFF`.
+Optional preview backends (auto-detected at configure time; absence disables the feature, never fails the build):
+
+| Feature | Dependency | CMake switch | When disabled |
+| --- | --- | --- | --- |
+| PDF first-page preview | Poppler C++ (`poppler-cpp` via pkg-config) | `-DPEEK_WITH_PDF=OFF` | `pdf_preview.cpp` is not compiled and `.pdf` files fall through to the text/image/fallback path |
+| Video and audio preview | Qt Multimedia + MultimediaWidgets (FFmpeg backend at runtime) | `-DPEEK_WITH_MULTIMEDIA=OFF` | Audio/video extensions are still recognized but show `No audio/video preview is available for this file (Qt Multimedia is not installed).` |
+
+The switches force a feature off even when its dependency is present. Leaving them `ON` (the default) enables the feature only when the dependency is actually found. The `--help` description and the no-argument summary line list whichever categories are compiled in (verified: full build reports "image files, PDFs, videos, audio files, text files and directories").
+
+Test-only dependencies (discovered only when `PEEK_BUILD_TESTS=ON`, the default):
+
+| Tool | Used by |
+| --- | --- |
+| Qt 6 Test (included in Arch's `qt6-base`) | Native `peek_preview` suite |
+| Python >= 3.9 (Arch: `python`) | Nautilus handoff (`peek_nautilus`) and Task C lab guard suites |
+
+FFmpeg is also test-only and optional: the audio/video suites synthesize tiny fixtures with `ffmpeg` at test time and skip cleanly when it is absent. To build the native application without tests or a Python requirement, configure with `-DPEEK_BUILD_TESTS=OFF`.
 
 Optional development tools (none are required to build):
 
@@ -63,9 +109,21 @@ cmake --preset debug
 cmake --build --preset debug
 ./build/debug/peek README.md
 
-# Run tests
+# Run the Debug suite
 ctest --preset debug
+
+# Release suite (same tests, optimized build)
+cmake --preset release
+cmake --build --preset release
+ctest --preset release
+
+# Sanitizer suite (AddressSanitizer + UndefinedBehaviorSanitizer)
+cmake --preset asan
+cmake --build --preset asan
+ctest --preset asan
 ```
+
+Sanitizer leak checks are not on by default: run `env ASAN_OPTIONS=detect_leaks=1 ctest --preset asan` for the leak pass (needs an environment that permits LeakSanitizer's process inspection; do not claim leak checks passed if it cannot run). An ASan pass without `detect_leaks=1` is not a leak pass. `tests/lsan.supp` narrowly suppresses only the known Qt-internal `QVideoWindow::event` leak from a *shown* `QVideoWidget` on the offscreen platform (probe-verified Peek-independent; audio previews create no `QVideoWidget` and are unaffected) — Peek-owned leaks still fail the gate.
 
 Without presets:
 
@@ -94,11 +152,11 @@ Remote URIs are not supported; operands are filesystem paths. No file-manager se
 | `1` | Missing/inaccessible path, broken symlink, or unsupported filesystem object (e.g. FIFO/device/socket) |
 | `2` | CLI usage error: empty operand, multiple operands, or unknown option |
 
-Failures report a diagnostic on stderr and create no preview window. Existence/type validation does not guarantee readability or that a path will remain unchanged; image decoding re-reads the file and reports failures in the window instead of crashing.
+Failures report a diagnostic on stderr and create no preview window. Existence/type validation does not guarantee readability or that a path will remain unchanged; decoding re-reads the file and reports failures in the window (image, PDF, text, and media handlers) instead of crashing.
 
 ## Nautilus selection handoff (diagnostic fallback)
 
-See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installation and Omarchy acceptance tests. The Script belongs at `~/.local/share/nautilus/scripts/Peek` on the default desktop setup. It decodes only local `file:` URIs and uses the first item in Nautilus-provided order for multiple selections; directories use the existing directory placeholder and image files now render. No shortcut, daemon, selection cache, polling, clipboard, or desktop configuration change is involved.
+See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installation and Omarchy acceptance tests. The Script belongs at `~/.local/share/nautilus/scripts/Peek` on the default desktop setup. It decodes only local `file:` URIs and uses the first item in Nautilus-provided order for multiple selections; directories show the directory placeholder, and image, PDF, text, video, and audio files render through the same native preview window as the CLI. No production Hyprland shortcut integration exists yet: there is no Space-to-preview binding, shortcut forwarding, daemon, single-instance behavior, selection cache, polling, clipboard, or desktop configuration change involved.
 
 ## Development workflow
 
@@ -109,8 +167,10 @@ See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installati
 - Static analysis: configure any preset (it exports `compile_commands.json`), then run `clang-tidy -p build/debug src/main.cpp`.
 - Keep changes small and update `docs/architecture.md` when module boundaries change.
 
-See [docs/architecture.md](docs/architecture.md) for the intended design.
+See [docs/architecture.md](docs/architecture.md) for the implemented design and planned direction.
 
 ## License
 
-Not yet chosen.
+Peek is licensed under the **GNU General Public License version 3 only** (see [`LICENSE`](LICENSE), SPDX-License-Identifier: `GPL-3.0-only`). Copyright (C) 2026 fardin3693.
+
+GPLv3 permits commercial use, but redistribution and derivative works are subject to its terms: conveying copies or modified versions requires making the source available and licensing the work under the same license. Private modifications that are never distributed carry no publication obligation.

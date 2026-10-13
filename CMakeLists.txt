@@ -70,8 +70,13 @@ add_executable(peek
     src/preview_request.h
     src/preview_window.cpp
     src/preview_window.h
+    src/preview_provider.h
     src/text_preview.cpp
     src/text_preview.h
+    src/text_provider.cpp
+    src/text_provider.h
+    src/image_provider.cpp
+    src/image_provider.h
     src/video_preview.cpp
     src/video_preview.h
     src/audio_preview.cpp
@@ -82,12 +87,14 @@ target_compile_definitions(peek PRIVATE PEEK_VERSION="${PROJECT_VERSION}")
 target_link_libraries(peek PRIVATE Qt6::Widgets)
 
 if(PEEK_HAVE_MULTIMEDIA)
+    target_sources(peek PRIVATE src/audio_provider.cpp src/audio_provider.h)
     target_compile_definitions(peek PRIVATE PEEK_WITH_MULTIMEDIA)
     target_link_libraries(peek PRIVATE Qt6::Multimedia Qt6::MultimediaWidgets)
 endif()
 
 if(PEEK_HAVE_POPPLER)
-    target_sources(peek PRIVATE src/pdf_preview.cpp src/pdf_preview.h)
+    target_sources(peek PRIVATE src/pdf_preview.cpp src/pdf_preview.h
+        src/pdf_provider.cpp src/pdf_provider.h)
     target_compile_definitions(peek PRIVATE PEEK_WITH_PDF)
     target_link_libraries(peek PRIVATE PkgConfig::POPPLER_CPP)
 endif()

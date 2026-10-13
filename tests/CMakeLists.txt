@@ -22,17 +22,21 @@ add_executable(peek_preview_tests
     ../src/preview_request.cpp
     ../src/preview_window.cpp
     ../src/text_preview.cpp
+    ../src/text_provider.cpp
+    ../src/image_provider.cpp
     ../src/video_preview.cpp
     ../src/audio_preview.cpp
 )
 target_include_directories(peek_preview_tests PRIVATE ../src)
 target_link_libraries(peek_preview_tests PRIVATE Qt6::Widgets Qt6::Test)
 if(PEEK_HAVE_MULTIMEDIA)
+    target_sources(peek_preview_tests PRIVATE ../src/audio_provider.cpp ../src/audio_provider.h)
     target_compile_definitions(peek_preview_tests PRIVATE PEEK_WITH_MULTIMEDIA)
     target_link_libraries(peek_preview_tests PRIVATE Qt6::Multimedia Qt6::MultimediaWidgets)
 endif()
 if(PEEK_HAVE_POPPLER)
-    target_sources(peek_preview_tests PRIVATE ../src/pdf_preview.cpp ../src/pdf_preview.h)
+    target_sources(peek_preview_tests PRIVATE ../src/pdf_preview.cpp ../src/pdf_preview.h
+        ../src/pdf_provider.cpp ../src/pdf_provider.h)
     target_compile_definitions(peek_preview_tests PRIVATE PEEK_WITH_PDF)
     target_link_libraries(peek_preview_tests PRIVATE PkgConfig::POPPLER_CPP)
 endif()

@@ -5,11 +5,7 @@
 #include <QCloseEvent>
 #include <QDir>
 #include <QFileInfo>
-#include <QFontDatabase>
-#include <QFontMetrics>
 #include <QHBoxLayout>
-#include <QImage>
-#include <QImageReader>
 #include <QLabel>
 #include <QPixmap>
 #include <QPlainTextEdit>
@@ -20,15 +16,15 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-#include <utility>
-
 #include "audio_preview.h"
-#include "text_preview.h"
+#include "image_provider.h"
+#include "text_provider.h"
 #include "video_preview.h"
 #ifdef PEEK_WITH_PDF
-#include "pdf_preview.h"
+#include "pdf_provider.h"
 #endif
 #ifdef PEEK_WITH_MULTIMEDIA
+#include "audio_provider.h"
 #include <QAudioOutput>
 #include <QMediaPlayer>
 #include <QVideoWidget>
@@ -37,7 +33,6 @@
 namespace
 {
 
-constexpr int kMaxDecodeDimension = 2048;
 constexpr int kMaxWindowWidth = 1024;
 constexpr int kMaxWindowHeight = 768;
 constexpr int kLabelAllowance = 120;
@@ -119,24 +114,52 @@ PreviewWindow::PreviewWindow(const PreviewRequest &request, QWidget *parent) : Q
     bool showingAudio = false;
     if (!request.isDirectory) {
         // Dispatch order: PDF, then text, then audio, then video, then the
-        // QImageReader image path, then the generic fallback inside
-        // showImageFile. Each handler owns its status message; a claimed file
-        // never falls through to an unrelated preview. Audio and video
-        // extension sets are disjoint, so their relative order is arbitrary.
+        // image provider, then the generic fallback. Each handler owns its
+        // status message; a claimed file never falls through to an unrelated
+        // preview. Audio and video extension sets are disjoint, so their
+        // relative order is arbitrary.
         bool handled = false;
 #ifdef PEEK_WITH_PDF
-        if (!handled && isPdfFile(request.path)) {
-            showingImage = showPdfFile(request.path, statusLabel, layout);
+        if (!handled && pdfProvider().supports(request.path) == ProviderSupport::Yes) {
+            // PDF is the first provider: render() builds the view and owns
+            // the status message. A PDF claim ends dispatch even when the
+            // first page cannot be rendered, so corrupt PDFs never fall
+            // through to an unrelated preview.
+            showingImage = pdfProvider().render(request.path, statusLabel, layout);
+            if (showingImage) {
+                m_imageLabel = findChild<QLabel *>(QStringLiteral("imageLabel"));
+                if (m_imageLabel != nullptr) {
+                    m_original = m_imageLabel->pixmap();
+                    updateScaledPixmap();
+                }
+            }
             handled = true;
         }
 #endif
-        if (!handled && isTextFile(request.path)) {
-            showingText = showTextFile(request.path, statusLabel, layout);
+        if (!handled && textProvider().supports(request.path) == ProviderSupport::Yes) {
+            // Text is the first provider: render() builds the view and owns
+            // the status message. A text claim ends dispatch even when the
+            // file cannot be decoded, so corrupt text never falls through to
+            // an unrelated preview.
+            showingText = textProvider().render(request.path, statusLabel, layout);
+            if (showingText) {
+                m_textView = findChild<QPlainTextEdit *>(QStringLiteral("textView"));
+            }
             handled = true;
         }
 #ifdef PEEK_WITH_MULTIMEDIA
-        if (!handled && isAudioFile(request.path)) {
-            showingAudio = showAudioFile(request.path, statusLabel, layout);
+        if (!handled && audioProvider().supports(request.path) == ProviderSupport::Yes) {
+            // Audio is the third provider: render() builds the streaming
+            // player plus controls and owns the status message. An audio
+            // claim ends dispatch even when the file cannot be played, so
+            // invalid audio never falls through to an unrelated preview.
+            showingAudio = audioProvider().render(request.path, statusLabel, layout);
+            if (showingAudio) {
+                m_audioPlayer = findChild<QMediaPlayer *>();
+                m_audioPlayButton = findChild<QPushButton *>(QStringLiteral("playButton"));
+                m_audioSeekSlider = findChild<QSlider *>(QStringLiteral("seekSlider"));
+                m_audioPositionLabel = findChild<QLabel *>(QStringLiteral("positionLabel"));
+            }
             handled = true;
         }
         if (!handled && isVideoFile(request.path)) {
@@ -158,8 +181,23 @@ PreviewWindow::PreviewWindow(const PreviewRequest &request, QWidget *parent) : Q
             handled = true;
         }
 #endif
+        if (!handled && imageProvider().supports(request.path) == ProviderSupport::Yes) {
+            // Image is the last provider: render() builds the view and owns
+            // the status message. An image claim ends dispatch even when the
+            // file cannot be decoded, so corrupt images never fall through to
+            // an unrelated preview.
+            showingImage = imageProvider().render(request.path, statusLabel, layout);
+            if (showingImage) {
+                m_imageLabel = findChild<QLabel *>(QStringLiteral("imageLabel"));
+                if (m_imageLabel != nullptr) {
+                    m_original = m_imageLabel->pixmap();
+                    updateScaledPixmap();
+                }
+            }
+            handled = true;
+        }
         if (!handled) {
-            showingImage = showImageFile(request.path, statusLabel, layout);
+            statusLabel->setText(QStringLiteral("No image preview is available for this file."));
         }
     } else {
         statusLabel->setText(QStringLiteral("Directory preview not implemented yet."));
@@ -208,124 +246,7 @@ bool PreviewWindow::isAudioPreview() const
 #endif
 }
 
-bool PreviewWindow::showImageFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout)
-{
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    if (!reader.canRead()) {
-        statusLabel->setText(QStringLiteral("No image preview is available for this file."));
-        return false;
-    }
-    const QSize nativeSize = reader.size();
-    if (nativeSize.isValid() && !nativeSize.isEmpty()) {
-        const QSize decodeSize =
-            fittedSize(nativeSize, QSize(kMaxDecodeDimension, kMaxDecodeDimension));
-        if (decodeSize != nativeSize) {
-            reader.setScaledSize(decodeSize);
-        }
-    }
-    QImage image = reader.read();
-    if (image.isNull()) {
-        QString detail = reader.errorString();
-        if (detail.isEmpty()) {
-            detail = QStringLiteral("unreadable or corrupt");
-        }
-        statusLabel->setText(QStringLiteral("Could not load an image preview of this "
-                                            "file (%1).")
-                                 .arg(detail));
-        return false;
-    }
-    m_original = QPixmap::fromImage(std::move(image));
-    const QSize imageSize = m_original.size();
-    QString format = QString::fromLatin1(reader.format()).toUpper();
-    if (format.isEmpty()) {
-        format = QStringLiteral("IMAGE");
-    }
-    statusLabel->setText(QStringLiteral("%1 image — %2 × %3 px")
-                             .arg(format)
-                             .arg(imageSize.width())
-                             .arg(imageSize.height()));
-
-    m_imageLabel = new QLabel(this);
-    m_imageLabel->setObjectName(QStringLiteral("imageLabel"));
-    m_imageLabel->setAlignment(Qt::AlignCenter);
-    m_imageLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_imageLabel->setMinimumSize(160, 120);
-    layout->addWidget(m_imageLabel, 1);
-    updateScaledPixmap();
-    return true;
-}
-
-#ifdef PEEK_WITH_PDF
-bool PreviewWindow::showPdfFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout)
-{
-    const PdfFirstPageResult pdf = renderPdfFirstPage(path);
-    if (pdf.image.isNull()) {
-        QString detail = pdf.error;
-        if (detail.isEmpty()) {
-            detail = QStringLiteral("unreadable or corrupt");
-        }
-        statusLabel->setText(
-            QStringLiteral("Could not load a PDF preview of this file (%1).").arg(detail));
-        return false;
-    }
-    m_original = QPixmap::fromImage(pdf.image);
-    if (m_original.isNull()) {
-        statusLabel->setText(QStringLiteral("Could not load a PDF preview of this file "
-                                            "(unreadable or corrupt)."));
-        return false;
-    }
-    const QSize imageSize = m_original.size();
-    statusLabel->setText(QStringLiteral("PDF document — page 1 of %1 — %2 × %3 px")
-                             .arg(pdf.pageCount)
-                             .arg(imageSize.width())
-                             .arg(imageSize.height()));
-
-    m_imageLabel = new QLabel(this);
-    m_imageLabel->setObjectName(QStringLiteral("imageLabel"));
-    m_imageLabel->setAlignment(Qt::AlignCenter);
-    m_imageLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_imageLabel->setMinimumSize(160, 120);
-    layout->addWidget(m_imageLabel, 1);
-    updateScaledPixmap();
-    return true;
-}
-#endif
-
 QSize PreviewWindow::originalImageSize() const { return m_original.size(); }
-
-bool PreviewWindow::showTextFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout)
-{
-    const TextPreviewResult text = loadTextPreview(path);
-    if (!text.error.isEmpty()) {
-        statusLabel->setText(
-            QStringLiteral("Could not load a text preview of this file (%1).").arg(text.error));
-        return false;
-    }
-    if (text.text.isEmpty()) {
-        statusLabel->setText(QStringLiteral("Text file — empty (%1 bytes)").arg(text.byteCount));
-    } else {
-        statusLabel->setText(QStringLiteral("Text file — %1 lines — %2 bytes")
-                                 .arg(text.lineCount)
-                                 .arg(text.byteCount));
-    }
-
-    m_textView = new QPlainTextEdit(this);
-    m_textView->setObjectName(QStringLiteral("textView"));
-    m_textView->setReadOnly(true);
-    // Long lines scroll horizontally instead of forcing a wide window.
-    m_textView->setLineWrapMode(QPlainTextEdit::NoWrap);
-    const QFont fixedFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    m_textView->setFont(fixedFont);
-    m_textView->setTabStopDistance(QFontMetricsF(fixedFont).horizontalAdvance(QLatin1Char(' ')) *
-                                   4.0);
-    m_textView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_textView->setMinimumSize(160, 120);
-    // Plain text only: never interpreted as rich text or HTML.
-    m_textView->setPlainText(text.text);
-    layout->addWidget(m_textView, 1);
-    return true;
-}
 
 #ifdef PEEK_WITH_MULTIMEDIA
 bool PreviewWindow::showVideoFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout)
@@ -422,106 +343,6 @@ bool PreviewWindow::showVideoFile(const QString &path, QLabel *statusLabel, QVBo
             });
 
     layout->addWidget(videoWidget, 1);
-    layout->addWidget(controls);
-    return true;
-}
-
-bool PreviewWindow::showAudioFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout)
-{
-    // Streaming playback like video, but with no video output: QMediaPlayer
-    // reads through the FFmpeg backend and never loads the whole file into
-    // memory. Playback starts paused; the user opts in with the Play button.
-    // The player is independent of the video player so the two backends can
-    // never share state across repeated previews.
-    m_audioPlayer = new QMediaPlayer(this);
-    auto *audio = new QAudioOutput(this);
-    m_audioPlayer->setAudioOutput(audio);
-    m_audioPlayer->setSource(QUrl::fromLocalFile(path));
-
-    auto *audioLabel = new QLabel(QStringLiteral("Audio preview"), this);
-    audioLabel->setObjectName(QStringLiteral("audioLabel"));
-    audioLabel->setAlignment(Qt::AlignCenter);
-    audioLabel->setTextFormat(Qt::PlainText);
-    audioLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    audioLabel->setMinimumSize(160, 120);
-
-    m_audioPlayButton = new QPushButton(QStringLiteral("Play"), this);
-    m_audioPlayButton->setObjectName(QStringLiteral("playButton"));
-    m_audioSeekSlider = new QSlider(Qt::Horizontal, this);
-    m_audioSeekSlider->setObjectName(QStringLiteral("seekSlider"));
-    m_audioSeekSlider->setRange(0, 0);
-    m_audioPositionLabel =
-        new QLabel(formatMediaTime(0) + QStringLiteral(" / ") + formatMediaTime(0), this);
-    m_audioPositionLabel->setObjectName(QStringLiteral("positionLabel"));
-    m_audioPositionLabel->setTextFormat(Qt::PlainText);
-
-    auto *controls = new QWidget(this);
-    controls->setObjectName(QStringLiteral("audioControls"));
-    auto *controlsLayout = new QHBoxLayout(controls);
-    controlsLayout->setContentsMargins(0, 0, 0, 0);
-    controlsLayout->addWidget(m_audioPlayButton);
-    controlsLayout->addWidget(m_audioSeekSlider, 1);
-    controlsLayout->addWidget(m_audioPositionLabel);
-
-    statusLabel->setText(QStringLiteral("Audio preview — paused."));
-
-    connect(m_audioPlayButton, &QPushButton::clicked, this, [this] {
-        if (m_audioPlayer == nullptr) {
-            return;
-        }
-        if (m_audioPlayer->playbackState() == QMediaPlayer::PlayingState) {
-            m_audioPlayer->pause();
-        } else {
-            m_audioPlayer->play();
-        }
-    });
-    connect(m_audioPlayer, &QMediaPlayer::playbackStateChanged, this,
-            [this](QMediaPlayer::PlaybackState state) {
-                if (m_audioPlayButton != nullptr) {
-                    m_audioPlayButton->setText(state == QMediaPlayer::PlayingState
-                                                   ? QStringLiteral("Pause")
-                                                   : QStringLiteral("Play"));
-                }
-            });
-    connect(m_audioPlayer, &QMediaPlayer::durationChanged, this, [this](qint64 duration) {
-        if (m_audioSeekSlider != nullptr) {
-            m_audioSeekSlider->setRange(0, static_cast<int>(qMax<qint64>(duration, 0)));
-        }
-        if (m_audioPositionLabel != nullptr && m_audioPlayer != nullptr) {
-            m_audioPositionLabel->setText(formatMediaTime(m_audioPlayer->position()) +
-                                          QStringLiteral(" / ") + formatMediaTime(duration));
-        }
-    });
-    connect(m_audioPlayer, &QMediaPlayer::positionChanged, this, [this](qint64 position) {
-        if (m_audioPlayer == nullptr) {
-            return;
-        }
-        if (m_audioSeekSlider != nullptr && !m_audioSeekSlider->isSliderDown()) {
-            m_audioSeekSlider->setValue(static_cast<int>(position));
-        }
-        if (m_audioPositionLabel != nullptr) {
-            m_audioPositionLabel->setText(formatMediaTime(position) + QStringLiteral(" / ") +
-                                          formatMediaTime(m_audioPlayer->duration()));
-        }
-    });
-    connect(m_audioSeekSlider, &QSlider::sliderMoved, this, [this](int value) {
-        if (m_audioPlayer != nullptr) {
-            m_audioPlayer->setPosition(static_cast<qint64>(value));
-        }
-    });
-    // Unsupported codecs, missing backends, and invalid files report through
-    // the audio status line. The controls stay in place so the failure never
-    // swaps in an unrelated preview.
-    connect(m_audioPlayer, &QMediaPlayer::errorOccurred, this,
-            [statusLabel](QMediaPlayer::Error, const QString &errorString) {
-                QString detail = errorString.trimmed();
-                if (detail.isEmpty()) {
-                    detail = QStringLiteral("unreadable or unsupported");
-                }
-                statusLabel->setText(QStringLiteral("Could not play this audio (%1).").arg(detail));
-            });
-
-    layout->addWidget(audioLabel, 1);
     layout->addWidget(controls);
     return true;
 }

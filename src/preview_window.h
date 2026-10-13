@@ -49,31 +49,19 @@ class PreviewWindow : public QWidget
   private:
     void updateScaledPixmap();
 
-    // Attempts the legacy QImageReader path. Creates the image label and
-    // status text on success. Returns true when an image is displayed.
-    bool showImageFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout);
-#ifdef PEEK_WITH_PDF
-    // Attempts the Poppler first-page path for PDFs. Same contract.
-    bool showPdfFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout);
-#endif
-    // Attempts the plain-text path. Creates the text view and status text on
-    // success. Returns true when text is displayed.
-    bool showTextFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout);
 #ifdef PEEK_WITH_MULTIMEDIA
     // Claims the preview area for a video file: streaming QMediaPlayer output
     // plus play/pause and seek controls. Always returns true so unsupported
     // codecs, missing backends, and invalid files report through the video
     // status line instead of falling through to unrelated previews.
     bool showVideoFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout);
-    // Claims the preview area for an audio file: streaming QMediaPlayer with
-    // audio output but no video output, plus the same play/pause and seek
-    // controls. Same always-true contract as showVideoFile. Kept as a
-    // separate small function (rather than a shared player abstraction) so
-    // audio and video resources stay independent and cannot interfere.
-    bool showAudioFile(const QString &path, QLabel *statusLabel, QVBoxLayout *layout);
 #endif
 
+    // Owned by the image provider's view (parented to the window); cached
+    // here after a successful render so resize scaling stays O(1).
     QLabel *m_imageLabel = nullptr;
+    // Owned by the text provider's view (parented to the window); cached here
+    // after a successful render so isTextPreview() stays O(1).
     QPlainTextEdit *m_textView = nullptr;
     QPixmap m_original;
 #ifdef PEEK_WITH_MULTIMEDIA
@@ -81,6 +69,9 @@ class PreviewWindow : public QWidget
     QPushButton *m_playButton = nullptr;
     QSlider *m_seekSlider = nullptr;
     QLabel *m_positionLabel = nullptr;
+    // Owned by the audio provider's view (parented to the window); cached
+    // here after a successful render so isAudioPreview() stays O(1) and
+    // close/destruction can stop the streaming player.
     QMediaPlayer *m_audioPlayer = nullptr;
     QPushButton *m_audioPlayButton = nullptr;
     QSlider *m_audioSeekSlider = nullptr;
