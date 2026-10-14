@@ -1,5 +1,7 @@
 #include "audio_preview.h"
 #include "image_provider.h"
+#include "markdown_preview.h"
+#include "markdown_provider.h"
 #include "preview_request.h"
 #include "preview_window.h"
 #include "text_preview.h"
@@ -21,6 +23,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTextBrowser>
 #include <QTimer>
 
 #include <array>
@@ -583,8 +586,6 @@ class PreviewTests : public QObject
     {
         QTest::addColumn<QString>("fileName");
         QTest::newRow("txt") << QStringLiteral("notes.txt");
-        QTest::newRow("md") << QStringLiteral("notes.md");
-        QTest::newRow("markdown") << QStringLiteral("notes.markdown");
         QTest::newRow("json") << QStringLiteral("data.json");
         QTest::newRow("jsonl") << QStringLiteral("data.jsonl");
         QTest::newRow("yaml") << QStringLiteral("data.yaml");
@@ -607,7 +608,6 @@ class PreviewTests : public QObject
         QTest::newRow("ts") << QStringLiteral("app.ts");
         QTest::newRow("rs") << QStringLiteral("main.rs");
         QTest::newRow("uppercase") << QStringLiteral("README.TXT");
-        QTest::newRow("mixed-case") << QStringLiteral("Notes.Md");
     }
 
     void textLoad()
@@ -913,13 +913,14 @@ class PreviewTests : public QObject
         QTest::addColumn<QString>("fileName");
         QTest::addColumn<bool>("supported");
         QTest::newRow("txt") << QStringLiteral("notes.txt") << true;
-        QTest::newRow("markdown") << QStringLiteral("notes.markdown") << true;
         QTest::newRow("uppercase-txt") << QStringLiteral("NOTES.TXT") << true;
-        QTest::newRow("mixed-case") << QStringLiteral("Notes.Md") << true;
         QTest::newRow("source") << QStringLiteral("main.cpp") << true;
         QTest::newRow("script") << QStringLiteral("run.py") << true;
         QTest::newRow("config") << QStringLiteral("data.json") << true;
         QTest::newRow("log") << QStringLiteral("server.LOG") << true;
+        QTest::newRow("md-not-text") << QStringLiteral("notes.md") << false;
+        QTest::newRow("markdown-not-text") << QStringLiteral("notes.markdown") << false;
+        QTest::newRow("mixed-case-md-not-text") << QStringLiteral("Notes.Md") << false;
         QTest::newRow("png") << QStringLiteral("photo.png") << false;
         QTest::newRow("pdf") << QStringLiteral("doc.pdf") << false;
         QTest::newRow("mp3") << QStringLiteral("sound.mp3") << false;
@@ -1050,6 +1051,300 @@ class PreviewTests : public QObject
             QVERIFY(!status->text().isEmpty());
             QVERIFY(status->text().contains(QStringLiteral("image preview")));
         }
+    }
+
+    void markdownProviderSupports_data()
+    {
+        QTest::addColumn<QString>("fileName");
+        QTest::addColumn<bool>("supported");
+        QTest::newRow("md") << QStringLiteral("notes.md") << true;
+        QTest::newRow("markdown") << QStringLiteral("notes.markdown") << true;
+        QTest::newRow("uppercase-md") << QStringLiteral("NOTES.MD") << true;
+        QTest::newRow("uppercase-markdown") << QStringLiteral("NOTES.MARKDOWN") << true;
+        QTest::newRow("mixed-case") << QStringLiteral("Notes.Md") << true;
+        QTest::newRow("mixed-case-markdown") << QStringLiteral("Notes.MarkDown") << true;
+        QTest::newRow("txt") << QStringLiteral("notes.txt") << false;
+        QTest::newRow("png") << QStringLiteral("photo.png") << false;
+        QTest::newRow("pdf") << QStringLiteral("doc.pdf") << false;
+        QTest::newRow("mp3") << QStringLiteral("sound.mp3") << false;
+        QTest::newRow("mp4") << QStringLiteral("clip.mp4") << false;
+        QTest::newRow("bin") << QStringLiteral("notes.bin") << false;
+        QTest::newRow("no-extension") << QStringLiteral("notes") << false;
+        QTest::newRow("md-suffix-not-final") << QStringLiteral("notes.md.txt") << false;
+        QTest::newRow("txt-suffix-markdown") << QStringLiteral("notes.txt.md") << true;
+    }
+
+    void markdownProviderSupports()
+    {
+        QFETCH(QString, fileName);
+        QFETCH(bool, supported);
+        const auto expected = supported ? ProviderSupport::Yes : ProviderSupport::No;
+        QCOMPARE(markdownProvider().supports(fileName), expected);
+        QCOMPARE(::markdownProviderSupports(fileName), expected);
+        QCOMPARE(isMarkdownFile(fileName), supported);
+    }
+
+    void markdownProviderSupportsIsCheap()
+    {
+        // Identification is extension-only: missing files with a Markdown
+        // suffix are still claimed, proving no content is read in supports().
+        QCOMPARE(markdownProvider().supports(QStringLiteral("/nonexistent/notes.MD")),
+                 ProviderSupport::Yes);
+        QCOMPARE(markdownProvider().supports(QStringLiteral("/nonexistent/notes.txt")),
+                 ProviderSupport::No);
+    }
+
+    void markdownProviderRenderNullGuards()
+    {
+        // Null widgets must not crash: render refuses safely.
+        QCOMPARE(markdownProvider().render(QStringLiteral("notes.md"), nullptr, nullptr), false);
+    }
+
+    void markdownRendersFormattedContent()
+    {
+        QCOMPARE(QLatin1String(markdownProvider().name), QLatin1String("markdown"));
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("notes.md"));
+        const QString contents =
+            QStringLiteral("# Title\n\nA paragraph with **bold** and *italic* text.\n\n"
+                           "- item one\n- item two\n\n"
+                           "1. first\n2. second\n\n"
+                           "Use `inline-code` here.\n\n"
+                           "```cpp\nint answer = 42;\n```\n\n"
+                           "> a wise quote\n\n"
+                           "[example](https://example.com)\n\n"
+                           "---\n\n"
+                           "| head-a | head-b |\n"
+                           "|---|---|\n"
+                           "| cell-one | cell-two |\n");
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray encoded = contents.toUtf8();
+        QVERIFY(file.write(encoded) == encoded.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isMarkdownPreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        auto *view = window.findChild<QTextBrowser *>(QStringLiteral("markdownView"));
+        QVERIFY(view != nullptr);
+        QVERIFY(view->isReadOnly());
+        // Links stay inert: never follow clicks, never open externally.
+        QVERIFY(!view->openLinks());
+        QVERIFY(!view->openExternalLinks());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("Markdown file")));
+        const QString shown = view->toPlainText();
+        QVERIFY(shown.contains(QStringLiteral("Title")));
+        QVERIFY(shown.contains(QStringLiteral("paragraph")));
+        QVERIFY(shown.contains(QStringLiteral("bold")));
+        QVERIFY(shown.contains(QStringLiteral("italic")));
+        QVERIFY(shown.contains(QStringLiteral("item one")));
+        QVERIFY(shown.contains(QStringLiteral("first")));
+        QVERIFY(shown.contains(QStringLiteral("answer")));
+        QVERIFY(shown.contains(QStringLiteral("inline-code")));
+        QVERIFY(shown.contains(QStringLiteral("wise quote")));
+        QVERIFY(shown.contains(QStringLiteral("example")));
+        QVERIFY(shown.contains(QStringLiteral("cell-one")));
+        QVERIFY(shown.contains(QStringLiteral("cell-two")));
+        // Formatting markers are consumed by the renderer, not shown raw.
+        QVERIFY(!shown.contains(QStringLiteral("**")));
+        QVERIFY(!shown.contains(QStringLiteral("```")));
+        QVERIFY(!shown.contains(QStringLiteral("`inline-code`")));
+        // Horizontal rule and table survive as document structure, not text.
+        QVERIFY(view->document()->toHtml().contains(QStringLiteral("<hr")));
+        QVERIFY(view->document()->toHtml().contains(QStringLiteral("<table")));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+    }
+
+    void markdownEmptyFileRenders()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("empty.md"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isMarkdownPreview());
+        QVERIFY(!window.isTextPreview());
+        auto *view = window.findChild<QTextBrowser *>(QStringLiteral("markdownView"));
+        QVERIFY(view != nullptr);
+        QVERIFY(view->toPlainText().isEmpty());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("empty")));
+    }
+
+    void markdownMalformedInputKeepsClaim()
+    {
+        // Non-UTF-8 Markdown stays claimed: status message, no Markdown
+        // view, and no fall-through to text or image previews.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("broken.markdown"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray contents("valid\x80invalid\n");
+        QVERIFY(file.write(contents) == contents.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isMarkdownPreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(window.findChild<QTextBrowser *>(QStringLiteral("markdownView")) == nullptr);
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("Could not load a Markdown preview")));
+    }
+
+    void markdownTooLargeKeepsClaim()
+    {
+        // Over-limit Markdown inherits the 2 MiB text cap and stays claimed.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("big.md"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QByteArray contents(static_cast<int>(kMaxTextFileBytes), 'a');
+        contents += '\n';
+        QVERIFY(file.write(contents) == contents.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isMarkdownPreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isImagePreview());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("too large")));
+    }
+
+    void markdownLeavesTextAndOthersAlone()
+    {
+        // The Markdown provider claims only Markdown: plain text still
+        // renders as text, and dispatch disjointness holds both directions.
+        QCOMPARE(markdownProvider().supports(QStringLiteral("notes.txt")), ProviderSupport::No);
+        QCOMPARE(markdownProvider().supports(QStringLiteral("photo.png")), ProviderSupport::No);
+        QCOMPARE(textProvider().supports(QStringLiteral("notes.md")), ProviderSupport::No);
+        QCOMPARE(textProvider().supports(QStringLiteral("notes.markdown")), ProviderSupport::No);
+
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString textPath = fixtures.filePath(QStringLiteral("plain.txt"));
+        QFile textFile(textPath);
+        QVERIFY(textFile.open(QIODevice::WriteOnly));
+        const QByteArray textContents("# not a heading, just text\n");
+        QVERIFY(textFile.write(textContents) == textContents.size());
+        textFile.close();
+        const auto textResult = validatePreviewPath(textPath);
+        QVERIFY2(textResult.error.isEmpty(), qPrintable(textResult.error));
+        {
+            PreviewWindow window(textResult.request);
+            QVERIFY(window.isTextPreview());
+            QVERIFY(!window.isMarkdownPreview());
+            auto *textView = window.findChild<QPlainTextEdit *>(QStringLiteral("textView"));
+            QVERIFY(textView != nullptr);
+            // Plain text keeps its raw markers verbatim.
+            QVERIFY(textView->toPlainText().contains(QStringLiteral("# not a heading")));
+        }
+
+        const QString mdPath = fixtures.filePath(QStringLiteral("doc.md"));
+        QFile mdFile(mdPath);
+        QVERIFY(mdFile.open(QIODevice::WriteOnly));
+        const QByteArray mdContents("# real heading\n");
+        QVERIFY(mdFile.write(mdContents) == mdContents.size());
+        mdFile.close();
+        const auto mdResult = validatePreviewPath(mdPath);
+        QVERIFY2(mdResult.error.isEmpty(), qPrintable(mdResult.error));
+        {
+            PreviewWindow window(mdResult.request);
+            QVERIFY(window.isMarkdownPreview());
+            QVERIFY(!window.isTextPreview());
+        }
+    }
+
+    void markdownEscapesRawHtml()
+    {
+        // Raw HTML in the source is shown escaped, never as live markup.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("xss.md"));
+        const QString contents =
+            QStringLiteral("# Hi\n\n<script>alert(1)</script>\n\n<b>not bold</b>\n");
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray encoded = contents.toUtf8();
+        QVERIFY(file.write(encoded) == encoded.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isMarkdownPreview());
+        auto *view = window.findChild<QTextBrowser *>(QStringLiteral("markdownView"));
+        QVERIFY(view != nullptr);
+        QVERIFY(view->toPlainText().contains(QStringLiteral("<script>alert(1)</script>")));
+        QVERIFY(view->toPlainText().contains(QStringLiteral("<b>not bold</b>")));
+        QVERIFY(!view->document()->toHtml().contains(QStringLiteral("<script>")));
+    }
+
+    void markdownLinksStayInert()
+    {
+        // javascript: links render as text but carry no executable effect:
+        // navigation is disabled and no external opener is attached.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("links.md"));
+        const QString contents =
+            QStringLiteral("[evil](javascript:alert(1))\n\n[ok](https://example.com)\n\n"
+                           "![alt](https://example.com/x.png)\n");
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray encoded = contents.toUtf8();
+        QVERIFY(file.write(encoded) == encoded.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isMarkdownPreview());
+        auto *view = window.findChild<QTextBrowser *>(QStringLiteral("markdownView"));
+        QVERIFY(view != nullptr);
+        QVERIFY(!view->openLinks());
+        QVERIFY(!view->openExternalLinks());
+        QVERIFY(view->searchPaths().isEmpty());
+        const QString shown = view->toPlainText();
+        QVERIFY(shown.contains(QStringLiteral("evil")));
+        QVERIFY(shown.contains(QStringLiteral("ok")));
+        // The remote image keeps its alt-text placeholder; the URL reference
+        // in the document never resolves to fetched bytes because
+        // loadResource() blocks non-local image loads (verified: the fetch
+        // path returns empty without network access).
+        QVERIFY(shown.contains(QChar(0xFFFC)) || shown.contains(QStringLiteral("alt")));
     }
 
     void imageProviderSupports_data()

@@ -8,6 +8,7 @@ class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QSlider;
+class QTextBrowser;
 class QVBoxLayout;
 #ifdef PEEK_WITH_MULTIMEDIA
 class QMediaPlayer;
@@ -26,6 +27,9 @@ class PreviewWindow : public QWidget
     bool isImagePreview() const;
     // True when a text file was loaded and is displayed in the text view.
     bool isTextPreview() const;
+    // True when a Markdown file was rendered and is displayed in the
+    // Markdown view. Markdown files never render as plain text.
+    bool isMarkdownPreview() const;
     // True when a video file claimed the preview area: a streaming player
     // widget with play/pause and seek controls. Playback failures surface as
     // a status message on the same widget, never a crash or a fallback swap.
@@ -63,6 +67,9 @@ class PreviewWindow : public QWidget
     // Owned by the text provider's view (parented to the window); cached here
     // after a successful render so isTextPreview() stays O(1).
     QPlainTextEdit *m_textView = nullptr;
+    // Owned by the Markdown provider's view (parented to the window); cached
+    // here after a successful render so isMarkdownPreview() stays O(1).
+    QTextBrowser *m_markdownView = nullptr;
     QPixmap m_original;
 #ifdef PEEK_WITH_MULTIMEDIA
     QMediaPlayer *m_videoPlayer = nullptr;

@@ -1,9 +1,10 @@
 # Nautilus selection handoff (Task B)
 
 This is the minimal selection bridge, **not the final Peek interaction**. Use
-Nautilus's right-click **Scripts → Peek** menu to diagnose handoff. No Hyprland
-shortcut, Space forwarding, window toggle, renderer, daemon, polling, selection
-cache, or clipboard communication is installed or implemented.
+Nautilus's right-click **Scripts → Peek** menu to diagnose handoff. The
+keyboard trigger in [quick-look-trigger.md](quick-look-trigger.md) reuses
+this Script unchanged. No Space forwarding, window toggle, renderer, daemon,
+polling, selection cache, or clipboard communication is installed or implemented.
 
 ## Contract
 

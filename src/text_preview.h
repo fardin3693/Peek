@@ -17,7 +17,8 @@ struct TextPreviewResult {
     int lineCount = 0;
 };
 
-// True for known plain-text extensions (case-insensitive). Unknown
+// True for known plain-text extensions (case-insensitive). Markdown (.md,
+// .markdown) is handled by the Markdown provider, not here. Unknown
 // extensions are never treated as text, so binary files stay on the
 // generic fallback path instead of being decoded speculatively.
 bool isTextFile(const QString &path);

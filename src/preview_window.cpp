@@ -13,11 +13,13 @@
 #include <QResizeEvent>
 #include <QShortcut>
 #include <QSlider>
+#include <QTextBrowser>
 #include <QUrl>
 #include <QVBoxLayout>
 
 #include "audio_preview.h"
 #include "image_provider.h"
+#include "markdown_provider.h"
 #include "text_provider.h"
 #include "video_preview.h"
 #ifdef PEEK_WITH_PDF
@@ -110,14 +112,15 @@ PreviewWindow::PreviewWindow(const PreviewRequest &request, QWidget *parent) : Q
 
     bool showingImage = false;
     bool showingText = false;
+    bool showingMarkdown = false;
     bool showingVideo = false;
     bool showingAudio = false;
     if (!request.isDirectory) {
-        // Dispatch order: PDF, then text, then audio, then video, then the
-        // image provider, then the generic fallback. Each handler owns its
-        // status message; a claimed file never falls through to an unrelated
-        // preview. Audio and video extension sets are disjoint, so their
-        // relative order is arbitrary.
+        // Dispatch order: PDF, then Markdown, then text, then audio, then
+        // video, then the image provider, then the generic fallback. Each
+        // handler owns its status message; a claimed file never falls through
+        // to an unrelated preview. Audio and video extension sets are
+        // disjoint, so their relative order is arbitrary.
         bool handled = false;
 #ifdef PEEK_WITH_PDF
         if (!handled && pdfProvider().supports(request.path) == ProviderSupport::Yes) {
@@ -136,8 +139,19 @@ PreviewWindow::PreviewWindow(const PreviewRequest &request, QWidget *parent) : Q
             handled = true;
         }
 #endif
+        if (!handled && markdownProvider().supports(request.path) == ProviderSupport::Yes) {
+            // Markdown precedes text: render() builds the formatted view and
+            // owns the status message. A Markdown claim ends dispatch even
+            // when the file cannot be decoded, so corrupt Markdown never
+            // falls through to an unrelated preview.
+            showingMarkdown = markdownProvider().render(request.path, statusLabel, layout);
+            if (showingMarkdown) {
+                m_markdownView = findChild<QTextBrowser *>(QStringLiteral("markdownView"));
+            }
+            handled = true;
+        }
         if (!handled && textProvider().supports(request.path) == ProviderSupport::Yes) {
-            // Text is the first provider: render() builds the view and owns
+            // Text follows Markdown: render() builds the view and owns
             // the status message. A text claim ends dispatch even when the
             // file cannot be decoded, so corrupt text never falls through to
             // an unrelated preview.
@@ -211,7 +225,7 @@ PreviewWindow::PreviewWindow(const PreviewRequest &request, QWidget *parent) : Q
         const int width = qBound(480, display.width(), kMaxWindowWidth);
         const int height = qBound(240, display.height() + kLabelAllowance, kMaxWindowHeight);
         resize(width, height);
-    } else if (showingText || showingVideo || showingAudio) {
+    } else if (showingText || showingMarkdown || showingVideo || showingAudio) {
         resize(640, 480);
     } else {
         resize(480, 240);
@@ -227,6 +241,8 @@ bool PreviewWindow::isImagePreview() const
 }
 
 bool PreviewWindow::isTextPreview() const { return m_textView != nullptr; }
+
+bool PreviewWindow::isMarkdownPreview() const { return m_markdownView != nullptr; }
 
 bool PreviewWindow::isVideoPreview() const
 {

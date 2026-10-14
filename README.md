@@ -6,11 +6,11 @@ Target platform: Linux desktops, developed first on Omarchy (Arch Linux, Hyprlan
 
 ## Status
 
-**Native previews for image, PDF, plain text, video, and audio files, plus a minimal Nautilus selection handoff.**
+**Native previews for image, PDF, Markdown, plain text, video, and audio files, plus a minimal Nautilus selection handoff.**
 
 Peek is a native C++17 application built on Qt 6 Widgets (see [docs/architecture.md](docs/architecture.md)). `peek PATH` validates a local file or directory and opens one decorated preview window; Escape or the ordinary window close action dismisses it and exits Peek. With no arguments, Peek prints version/platform information and brief usage, then exits successfully. `--help` and `--version` remain available.
 
-For files, the window dispatches by extension in a fixed order — PDF, then plain text, then audio, then video, then image — and each handler owns its status message. A file claimed by one handler never falls through to an unrelated preview. Media playback streams through the Qt Multimedia backend and never loads whole files into memory.
+For files, the window dispatches by extension in a fixed order — PDF, then Markdown, then plain text, then audio, then video, then image — and each handler owns its status message. A file claimed by one handler never falls through to an unrelated preview. Media playback streams through the Qt Multimedia backend and never loads whole files into memory.
 
 ### Image
 
@@ -27,9 +27,16 @@ For files, the window dispatches by extension in a fixed order — PDF, then pla
 
 ### Plain text
 
-- Recognized by extension only (case-insensitive): `txt md markdown json jsonl yaml yml toml csv tsv log xml html css c h cpp hpp py sh lua js ts rs`. Unknown extensions are never decoded as text.
+- Recognized by extension only (case-insensitive): `txt json jsonl yaml yml toml csv tsv log xml html css c h cpp hpp py sh lua js ts rs`. Markdown (`md markdown`) is rendered as formatted Markdown, not plain text. Unknown extensions are never decoded as text.
 - Limits: at most 2 MiB (checked before reading, and the read itself is bounded so a file that grows mid-read still cannot exceed it); strict UTF-8 only; embedded NUL bytes rejected; a leading UTF-8 BOM is stripped. Empty files succeed and report `Text file — empty (N bytes)`.
 - Shown read-only in a fixed-width, horizontally scrolling view with a `Text file — L lines — B bytes` status line. Text is never interpreted as rich text or HTML, and never executed.
+
+### Markdown (formatted, no new dependencies)
+
+- Recognized by extension only (case-insensitive): `md markdown`. Rendered through Qt's built-in Markdown support (`QTextDocument::setMarkdown`, GitHub dialect) into a read-only view with a `Markdown file — L lines — B bytes` status line; empty files report `Markdown file — empty (N bytes)`. Markdown files never render as plain text, and invalid/unreadable Markdown stays on the Markdown status line (`Could not load a Markdown preview of this file (…).`).
+- Supported: headings, paragraphs, ordered/unordered lists, bold/italic, inline code and fenced code blocks, blockquotes, links (shown, never followed), horizontal rules, and GitHub-style tables. Unsupported: raw embedded HTML (shown escaped as literal text, never rendered), task-list checkboxes, footnotes, strikethrough extensions beyond Qt's dialect, embedded images fetched from the network, and automatic link opening.
+- Security: treated as untrusted input — loaded through the same bounded 2 MiB, strict-UTF-8, NUL-rejecting path as plain text; rendered with `MarkdownNoHTML` so raw HTML cannot inject markup or scripts; the view never follows links (`openLinks`/`openExternalLinks` off, empty search paths) and never fetches remote images or stylesheets (non-local resource loads resolve empty; local-file images may still render when already on disk).
+- Same 640×480 window sizing as text; Escape dismissal unchanged.
 
 ### Video (streaming, requires the Qt Multimedia backend)
 
@@ -50,7 +57,7 @@ For files, the window dispatches by extension in a fixed order — PDF, then pla
 
 ### Not yet implemented
 
-Archives, office documents, Markdown rendering, and syntax highlighting; Hyprland shortcuts, Space-to-preview/toggle, and single-instance behavior. The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification; audible PipeWire output and real-time duration readouts likewise need a Wayland-session check.
+Archives, office documents, Markdown rendering, and syntax highlighting; Space-to-preview/toggle and single-instance behavior (the Ctrl+Alt+Shift+F12 trigger in [docs/quick-look-trigger.md](docs/quick-look-trigger.md) reuses this window as-is: repeats stack, nothing re-targets). The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification; audible PipeWire output and real-time duration readouts likewise need a Wayland-session check.
 
 Peek reads file contents only to decode the selected file for its preview (image pixels, PDF first page, text bytes, media stream); it never enumerates directories. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
 
@@ -156,7 +163,7 @@ Failures report a diagnostic on stderr and create no preview window. Existence/t
 
 ## Nautilus selection handoff (diagnostic fallback)
 
-See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installation and Omarchy acceptance tests. The Script belongs at `~/.local/share/nautilus/scripts/Peek` on the default desktop setup. It decodes only local `file:` URIs and uses the first item in Nautilus-provided order for multiple selections; directories show the directory placeholder, and image, PDF, text, video, and audio files render through the same native preview window as the CLI. No production Hyprland shortcut integration exists yet: there is no Space-to-preview binding, shortcut forwarding, daemon, single-instance behavior, selection cache, polling, clipboard, or desktop configuration change involved.
+See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installation and Omarchy acceptance tests. The Script belongs at `~/.local/share/nautilus/scripts/Peek` on the default desktop setup. It decodes only local `file:` URIs and uses the first item in Nautilus-provided order for multiple selections; directories show the directory placeholder, and image, PDF, Markdown, text, video, and audio files render through the same native preview window as the CLI. The keyboard trigger is user-local configuration documented in [docs/quick-look-trigger.md](docs/quick-look-trigger.md) (Ctrl+Alt+Shift+F12 forwarding to this Script; installed manually, never by the build). There is no Space-to-preview binding, daemon, single-instance behavior, selection cache, polling, clipboard, or desktop configuration change involved.
 
 ## Development workflow
 

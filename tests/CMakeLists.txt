@@ -23,6 +23,8 @@ add_executable(peek_preview_tests
     ../src/preview_window.cpp
     ../src/text_preview.cpp
     ../src/text_provider.cpp
+    ../src/markdown_preview.cpp
+    ../src/markdown_provider.cpp
     ../src/image_provider.cpp
     ../src/video_preview.cpp
     ../src/audio_preview.cpp
@@ -76,6 +78,17 @@ add_test(NAME peek_taskc_lab_guard COMMAND ${Python3_EXECUTABLE} -B
     "${CMAKE_CURRENT_SOURCE_DIR}/check_taskc_lab.py"
 )
 set_tests_properties(peek_taskc_lab_guard PROPERTIES
+    ENVIRONMENT "${PEEK_TEST_ENV}"
+    TIMEOUT 60
+)
+
+# Regression guard: the P-UX1 Quick Look trigger files must stay consistent
+# (Hyprland snippet shape, Nautilus accelerator line, contract doc present).
+# No desktop changes, no key synthesis; see docs/quick-look-trigger.md.
+add_test(NAME peek_ux1_trigger_guard COMMAND ${Python3_EXECUTABLE} -B
+    "${CMAKE_CURRENT_SOURCE_DIR}/check_ux1_trigger.py"
+)
+set_tests_properties(peek_ux1_trigger_guard PROPERTIES
     ENVIRONMENT "${PEEK_TEST_ENV}"
     TIMEOUT 60
 )

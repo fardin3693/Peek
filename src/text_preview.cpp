@@ -78,14 +78,14 @@ int countLines(const QString &text)
 bool isTextFile(const QString &path)
 {
     static const QSet<QString> extensions = {
-        QStringLiteral("txt"),  QStringLiteral("md"),    QStringLiteral("markdown"),
-        QStringLiteral("json"), QStringLiteral("jsonl"), QStringLiteral("yaml"),
-        QStringLiteral("yml"),  QStringLiteral("toml"),  QStringLiteral("csv"),
-        QStringLiteral("tsv"),  QStringLiteral("log"),   QStringLiteral("xml"),
-        QStringLiteral("html"), QStringLiteral("css"),   QStringLiteral("c"),
-        QStringLiteral("h"),    QStringLiteral("cpp"),   QStringLiteral("hpp"),
-        QStringLiteral("py"),   QStringLiteral("sh"),    QStringLiteral("lua"),
-        QStringLiteral("js"),   QStringLiteral("ts"),    QStringLiteral("rs"),
+        QStringLiteral("txt"),  QStringLiteral("json"), QStringLiteral("jsonl"),
+        QStringLiteral("yaml"), QStringLiteral("yml"),  QStringLiteral("toml"),
+        QStringLiteral("csv"),  QStringLiteral("tsv"),  QStringLiteral("log"),
+        QStringLiteral("xml"),  QStringLiteral("html"), QStringLiteral("css"),
+        QStringLiteral("c"),    QStringLiteral("h"),    QStringLiteral("cpp"),
+        QStringLiteral("hpp"),  QStringLiteral("py"),   QStringLiteral("sh"),
+        QStringLiteral("lua"),  QStringLiteral("js"),   QStringLiteral("ts"),
+        QStringLiteral("rs"),
     };
     return extensions.contains(QFileInfo(path).suffix().toLower());
 }
