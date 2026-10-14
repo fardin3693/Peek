@@ -99,7 +99,9 @@ TextPreviewResult loadTextPreview(const QString &path)
         result.error = QStringLiteral("the file cannot be accessed");
         return result;
     }
-    if (info.size() < 0 || info.size() > kMaxTextFileBytes) {
+    // QFileInfo::size() is >= 0 for an existing file; only the upper bound
+    // can trigger here.
+    if (info.size() > kMaxTextFileBytes) {
         result.error = QStringLiteral("the file is too large to preview (2 MiB limit)");
         return result;
     }

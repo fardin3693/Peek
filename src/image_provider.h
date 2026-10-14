@@ -8,11 +8,12 @@
 // Identification is a cheap, bounded, case-insensitive extension match
 // against the formats the linked Qt image plugins report via
 // QImageReader::supportedImageFormats(). No file content is read or decoded
-// during supports(). Rendering keeps the previous behavior exactly:
-// QImageReader with auto-transform (EXIF orientation), shrink-only decode
-// capped at 2048 px on the longest side, KeepAspectRatio/SmoothTransformation
-// display scaling, the same status messages, and the same "imageLabel"
-// object name. No new dependencies (Qt Gui via Widgets).
+// during supports(). Rendering uses the shared bounded decoder from
+// preview_util.h (auto-transform, shrink-only, 2048 px longest-side cap with
+// a bounded request plus post-decode shrink when the native size is
+// unknown), KeepAspectRatio/SmoothTransformation display scaling, the same
+// status messages, and the same "imageLabel" object name. No new
+// dependencies (Qt Gui via Widgets).
 ProviderSupport imageProviderSupports(const QString &path);
 bool renderImagePreview(const QString &path, QLabel *statusLabel, QVBoxLayout *layout);
 

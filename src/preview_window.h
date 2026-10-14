@@ -9,6 +9,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QSlider;
 class QTextBrowser;
+class QTimer;
 class QVBoxLayout;
 #ifdef PEEK_WITH_MULTIMEDIA
 class QMediaPlayer;
@@ -51,7 +52,11 @@ class PreviewWindow : public QWidget
     void closeEvent(QCloseEvent *event) override;
 
   private:
-    void updateScaledPixmap();
+    // Fast mode keeps interactive drags cheap on the UI thread; a
+    // single-shot timer schedules one smooth pass once the resize settles.
+    // Smooth passes are skipped when the available size is unchanged.
+    void updateScaledPixmap(Qt::TransformationMode mode = Qt::SmoothTransformation);
+    void scheduleSmoothRescale();
 
 #ifdef PEEK_WITH_MULTIMEDIA
     // Claims the preview area for a video file: streaming QMediaPlayer output
@@ -71,6 +76,10 @@ class PreviewWindow : public QWidget
     // here after a successful render so isMarkdownPreview() stays O(1).
     QTextBrowser *m_markdownView = nullptr;
     QPixmap m_original;
+    // Last label size rendered with SmoothTransformation; fast drag previews
+    // never update it so the debounced smooth pass still runs.
+    QSize m_lastSmoothAvailable;
+    QTimer *m_smoothTimer = nullptr;
 #ifdef PEEK_WITH_MULTIMEDIA
     QMediaPlayer *m_videoPlayer = nullptr;
     QPushButton *m_playButton = nullptr;

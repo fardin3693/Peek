@@ -1,8 +1,11 @@
 #include "markdown_provider.h"
 
 #include "markdown_preview.h"
+#include "preview_util.h"
 #include "text_preview.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QLabel>
 #include <QTextBrowser>
 #include <QTextDocument>
@@ -14,31 +17,48 @@ namespace
 {
 
 // Read-only Markdown view that never fetches remote content and never
-// navigates. Image/stylesheet resources resolve to nothing (so `![alt](url)`
-// leaves a placeholder instead of a network fetch), and with openLinks
-// disabled anchor clicks emit anchorClicked without following the link —
-// with no connection attached, that signal goes nowhere. Note: an empty URL
-// passes isLocalFile()/scheme checks but QTextBrowser cannot resolve it to
-// content, so it still renders as a placeholder.
+// navigates. Image/stylesheet resources resolve only to files inside the
+// document directory (relative URLs resolve against the document, never the
+// process working directory; absolute file: URLs outside the document map to
+// a placeholder), and images decode through the shared 2048 px bounded
+// loader. With openLinks disabled anchor clicks emit anchorClicked without
+// following the link — with no connection attached, that signal goes nowhere.
 class MarkdownView : public QTextBrowser
 {
   public:
-    explicit MarkdownView(QWidget *parent = nullptr) : QTextBrowser(parent) {}
+    explicit MarkdownView(const QString &documentDir, QWidget *parent = nullptr)
+        : QTextBrowser(parent), m_baseDir(documentDir)
+    {
+    }
 
     QVariant loadResource(int type, const QUrl &name) override
     {
-        // Block remote image/stylesheet loads: only allow the local-file
-        // fallback for file: URLs so relative images next to the document can
-        // still render when already on disk. Everything else (http/https,
-        // data:, unknown schemes) resolves empty.
-        if (type == QTextDocument::ImageResource || type == QTextDocument::StyleSheetResource) {
-            if (name.isLocalFile() || name.scheme().isEmpty()) {
-                return QTextBrowser::loadResource(type, name);
+        if (type == QTextDocument::ImageResource) {
+            const QString local = peek_util::resolveSiblingResource(name, m_baseDir);
+            if (local.isEmpty()) {
+                return {};
             }
-            return {};
+            const QImage bounded = peek_util::loadBoundedImage(local);
+            if (bounded.isNull()) {
+                return {};
+            }
+            return QVariant(bounded);
+        }
+        if (type == QTextDocument::StyleSheetResource) {
+            // Stylesheets carry no decode risk, but the same directory scope
+            // applies: only siblings of the document may load, resolved
+            // explicitly so the cwd never leaks in.
+            const QString local = peek_util::resolveSiblingResource(name, m_baseDir);
+            if (local.isEmpty()) {
+                return {};
+            }
+            return QTextBrowser::loadResource(type, QUrl::fromLocalFile(local));
         }
         return QTextBrowser::loadResource(type, name);
     }
+
+  private:
+    QString m_baseDir;
 };
 
 } // namespace
@@ -73,18 +93,17 @@ bool renderMarkdownPreview(const QString &path, QLabel *statusLabel, QVBoxLayout
 
     // Parent views to the host widget owning the layout so Qt destroys them
     // with the window; the dispatch layer tracks them via object names.
-    QWidget *host = layout->parentWidget();
-    if (host == nullptr) {
-        host = qobject_cast<QWidget *>(statusLabel->parent());
-    }
-    auto *markdownView = new MarkdownView(host);
+    QWidget *host = peek_util::hostWidget(layout, statusLabel);
+    const QString documentDir = QFileInfo(path).absolutePath();
+    auto *markdownView = new MarkdownView(documentDir, host);
     markdownView->setObjectName(QStringLiteral("markdownView"));
     markdownView->setReadOnly(true);
     // Never navigate or fetch: links stay inert, external opens stay off, and
-    // there is no search path for relative source lookups.
+    // relative lookups resolve against the document directory (set here so
+    // any base-class fallback cannot fall back to the process cwd).
     markdownView->setOpenLinks(false);
     markdownView->setOpenExternalLinks(false);
-    markdownView->setSearchPaths(QStringList());
+    markdownView->setSearchPaths(QStringList(documentDir));
     markdownView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     markdownView->setMinimumSize(160, 120);
     QTextDocument::MarkdownFeatures features = QTextDocument::MarkdownDialectGitHub;

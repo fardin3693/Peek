@@ -11,6 +11,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Optional developer rebuild cache: uses ccache when present, never fails
+# the configure when absent.
+find_program(PEEK_CCACHE_PROGRAM ccache)
+if(PEEK_CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${PEEK_CCACHE_PROGRAM})
+endif()
+
 # Default to Release for single-config generators when nothing is specified.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -68,6 +75,7 @@ add_executable(peek
     src/main.cpp
     src/preview_request.cpp
     src/preview_request.h
+    src/preview_util.h
     src/preview_window.cpp
     src/preview_window.h
     src/preview_provider.h
@@ -114,6 +122,19 @@ function(peek_configure_target target)
 endfunction()
 
 peek_configure_target(peek)
+
+# Optional static-analysis gate: `cmake --build --preset debug --target peek_tidy`
+# runs clang-tidy over the application sources using the committed
+# `.clang-tidy` config and the preset's compile_commands.json. Absence of the
+# clang-tidy binary never fails the configure.
+find_program(PEEK_CLANG_TIDY_PROGRAM clang-tidy)
+if(PEEK_CLANG_TIDY_PROGRAM)
+    add_custom_target(peek_tidy
+        COMMAND ${PEEK_CLANG_TIDY_PROGRAM} -p ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Running clang-tidy on Peek sources"
+        VERBATIM)
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS peek RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

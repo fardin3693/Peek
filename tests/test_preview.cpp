@@ -3,6 +3,7 @@
 #include "markdown_preview.h"
 #include "markdown_provider.h"
 #include "preview_request.h"
+#include "preview_util.h"
 #include "preview_window.h"
 #include "text_preview.h"
 #include "text_provider.h"
@@ -27,6 +28,7 @@
 #include <QTimer>
 
 #include <array>
+#include <climits>
 
 #ifdef PEEK_WITH_MULTIMEDIA
 #include "audio_provider.h"
@@ -1336,7 +1338,9 @@ class PreviewTests : public QObject
         QVERIFY(view != nullptr);
         QVERIFY(!view->openLinks());
         QVERIFY(!view->openExternalLinks());
-        QVERIFY(view->searchPaths().isEmpty());
+        // Relative lookups resolve against the document directory, never the
+        // process cwd.
+        QCOMPARE(view->searchPaths(), QStringList(QFileInfo(path).absolutePath()));
         const QString shown = view->toPlainText();
         QVERIFY(shown.contains(QStringLiteral("evil")));
         QVERIFY(shown.contains(QStringLiteral("ok")));
@@ -2727,6 +2731,119 @@ class PreviewTests : public QObject
         QCOMPARE(process.state(), QProcess::NotRunning);
         QVERIFY2(stayedRunning, diagnostics.constData());
     }
+
+    void boundedImageCapsLargeDecode()
+    {
+        // P1: a wide image decodes capped at 2048 px on the longest side,
+        // never held as a giant pixmap by the window.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("wide.png"));
+        QVERIFY(writeTestImage(path, QSize(3000, 100), "png"));
+
+        QString detail;
+        const QImage bounded = peek_util::loadBoundedImage(path, &detail);
+        QVERIFY2(!bounded.isNull(), qPrintable(detail));
+        QVERIFY(bounded.width() <= 2048);
+        QVERIFY(bounded.height() <= 2048);
+        QCOMPARE(bounded.width(), 2048);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isImagePreview());
+        QVERIFY(window.originalImageSize().width() <= 2048);
+        QVERIFY(window.originalImageSize().height() <= 2048);
+    }
+
+    void markdownSiblingResourceScope()
+    {
+        // P2: absolute file: URLs outside the document map to a placeholder,
+        // document-relative siblings resolve inside, missing siblings and
+        // parent-traversal escapes resolve empty, and remote schemes stay
+        // blocked.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString docDir = fixtures.path();
+        const QString sibling = fixtures.filePath(QStringLiteral("sibling.png"));
+        QVERIFY(writeTestImage(sibling, QSize(16, 16), "png"));
+
+        QTemporaryDir elsewhere;
+        QVERIFY(elsewhere.isValid());
+        const QString outside = elsewhere.filePath(QStringLiteral("outside.png"));
+        QVERIFY(writeTestImage(outside, QSize(16, 16), "png"));
+
+        QCOMPARE(peek_util::resolveSiblingResource(QUrl::fromLocalFile(outside), docDir),
+                 QString());
+        const QString resolved =
+            peek_util::resolveSiblingResource(QUrl(QStringLiteral("sibling.png")), docDir);
+        QVERIFY(!resolved.isEmpty());
+        QCOMPARE(QFileInfo(resolved).canonicalFilePath(), QFileInfo(sibling).canonicalFilePath());
+        QCOMPARE(peek_util::resolveSiblingResource(QUrl(QStringLiteral("missing.png")), docDir),
+                 QString());
+        QCOMPARE(peek_util::resolveSiblingResource(QUrl(QStringLiteral("../escape.png")), docDir),
+                 QString());
+        QCOMPARE(peek_util::resolveSiblingResource(
+                     QUrl(QStringLiteral("https://example.com/x.png")), docDir),
+                 QString());
+
+        // A huge sibling image still decodes capped through the shared loader.
+        const QString big = fixtures.filePath(QStringLiteral("big.png"));
+        QVERIFY(writeTestImage(big, QSize(3000, 60), "png"));
+        const QImage bounded = peek_util::loadBoundedImage(big);
+        QVERIFY(!bounded.isNull());
+        QVERIFY(bounded.width() <= 2048);
+
+        // Both the absolute-outside and the sibling reference render as a
+        // Markdown preview without crashing or leaking the cwd.
+        for (const QString &body :
+             {QStringLiteral("![alt](%1)\n").arg(QUrl::fromLocalFile(outside).toString()),
+              QStringLiteral("![alt](sibling.png)\n")}) {
+            const QString mdPath = fixtures.filePath(QStringLiteral("scope.md"));
+            QFile md(mdPath);
+            QVERIFY(md.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            QVERIFY(md.write(body.toUtf8()) == body.toUtf8().size());
+            md.close();
+            const auto result = validatePreviewPath(mdPath);
+            QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+            PreviewWindow window(result.request);
+            QVERIFY(window.isMarkdownPreview());
+            auto *view = window.findChild<QTextBrowser *>(QStringLiteral("markdownView"));
+            QVERIFY(view != nullptr);
+            QCOMPARE(view->searchPaths(), QStringList(docDir));
+        }
+    }
+
+    void sliderClamp()
+    {
+        // P4: durations past 2^31 ms cannot wrap the slider range negative.
+        QCOMPARE(peek_util::clampMsForSlider(-5), 0);
+        QCOMPARE(peek_util::clampMsForSlider(0), 0);
+        QCOMPARE(peek_util::clampMsForSlider(1234), 1234);
+        QCOMPARE(peek_util::clampMsForSlider(static_cast<qint64>(INT_MAX) + 1000LL), INT_MAX);
+    }
+
+#ifdef PEEK_WITH_MULTIMEDIA
+    void audioPlayerHasStableName()
+    {
+        // P3: the audio player is found by object name, so a future second
+        // player type cannot make the dispatch cache the wrong object.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("named.wav"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isAudioPreview());
+        auto *named = window.findChild<QMediaPlayer *>(QStringLiteral("audioPlayer"));
+        QVERIFY(named != nullptr);
+        QCOMPARE(window.findChild<QMediaPlayer *>(QStringLiteral("audioPlayer")), named);
+    }
+#endif
 };
 
 QTEST_MAIN(PreviewTests)

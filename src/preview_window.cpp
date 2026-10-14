@@ -1,6 +1,7 @@
 #include "preview_window.h"
 
 #include "preview_request.h"
+#include "preview_util.h"
 
 #include <QCloseEvent>
 #include <QDir>
@@ -14,6 +15,7 @@
 #include <QShortcut>
 #include <QSlider>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -38,20 +40,10 @@ namespace
 constexpr int kMaxWindowWidth = 1024;
 constexpr int kMaxWindowHeight = 768;
 constexpr int kLabelAllowance = 120;
+constexpr int kSmoothRescaleDelayMs = 100;
 
 #ifdef PEEK_WITH_MULTIMEDIA
-// Formats milliseconds as m:ss for the playback-position indicator. Shared
-// by the video and audio players, which have identical control layouts.
-QString formatMediaTime(qint64 ms)
-{
-    if (ms < 0) {
-        ms = 0;
-    }
-    const qint64 totalSeconds = ms / 1000;
-    return QStringLiteral("%1:%2")
-        .arg(totalSeconds / 60)
-        .arg(totalSeconds % 60, 2, 10, QLatin1Char('0'));
-}
+using peek_util::formatMediaTime;
 #endif
 
 } // namespace
@@ -169,7 +161,7 @@ PreviewWindow::PreviewWindow(const PreviewRequest &request, QWidget *parent) : Q
             // invalid audio never falls through to an unrelated preview.
             showingAudio = audioProvider().render(request.path, statusLabel, layout);
             if (showingAudio) {
-                m_audioPlayer = findChild<QMediaPlayer *>();
+                m_audioPlayer = findChild<QMediaPlayer *>(QStringLiteral("audioPlayer"));
                 m_audioPlayButton = findChild<QPushButton *>(QStringLiteral("playButton"));
                 m_audioSeekSlider = findChild<QSlider *>(QStringLiteral("seekSlider"));
                 m_audioPositionLabel = findChild<QLabel *>(QStringLiteral("positionLabel"));
@@ -322,7 +314,7 @@ bool PreviewWindow::showVideoFile(const QString &path, QLabel *statusLabel, QVBo
             });
     connect(m_videoPlayer, &QMediaPlayer::durationChanged, this, [this](qint64 duration) {
         if (m_seekSlider != nullptr) {
-            m_seekSlider->setRange(0, static_cast<int>(qMax<qint64>(duration, 0)));
+            m_seekSlider->setRange(0, peek_util::clampMsForSlider(duration));
         }
         if (m_positionLabel != nullptr && m_videoPlayer != nullptr) {
             m_positionLabel->setText(formatMediaTime(m_videoPlayer->position()) +
@@ -334,7 +326,7 @@ bool PreviewWindow::showVideoFile(const QString &path, QLabel *statusLabel, QVBo
             return;
         }
         if (m_seekSlider != nullptr && !m_seekSlider->isSliderDown()) {
-            m_seekSlider->setValue(static_cast<int>(position));
+            m_seekSlider->setValue(peek_util::clampMsForSlider(position));
         }
         if (m_positionLabel != nullptr) {
             m_positionLabel->setText(formatMediaTime(position) + QStringLiteral(" / ") +
@@ -378,7 +370,13 @@ QSize PreviewWindow::fittedSize(const QSize &original, const QSize &bounds)
 void PreviewWindow::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    updateScaledPixmap();
+    if (m_imageLabel == nullptr || m_original.isNull()) {
+        return;
+    }
+    // Cheap immediate feedback during the drag, then one debounced smooth
+    // pass once the size settles.
+    updateScaledPixmap(Qt::FastTransformation);
+    scheduleSmoothRescale();
 }
 
 void PreviewWindow::closeEvent(QCloseEvent *event)
@@ -396,7 +394,7 @@ void PreviewWindow::closeEvent(QCloseEvent *event)
     QWidget::closeEvent(event);
 }
 
-void PreviewWindow::updateScaledPixmap()
+void PreviewWindow::updateScaledPixmap(Qt::TransformationMode mode)
 {
     if (m_imageLabel == nullptr || m_original.isNull()) {
         return;
@@ -405,7 +403,24 @@ void PreviewWindow::updateScaledPixmap()
     if (available.isEmpty()) {
         return;
     }
-    const QPixmap scaled =
-        m_original.scaled(available, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    if (mode == Qt::SmoothTransformation && available == m_lastSmoothAvailable) {
+        return;
+    }
+    const QPixmap scaled = m_original.scaled(available, Qt::KeepAspectRatio, mode);
     m_imageLabel->setPixmap(scaled);
+    if (mode == Qt::SmoothTransformation) {
+        m_lastSmoothAvailable = available;
+    }
+}
+
+void PreviewWindow::scheduleSmoothRescale()
+{
+    if (m_smoothTimer == nullptr) {
+        m_smoothTimer = new QTimer(this);
+        m_smoothTimer->setSingleShot(true);
+        m_smoothTimer->setInterval(kSmoothRescaleDelayMs);
+        connect(m_smoothTimer, &QTimer::timeout, this,
+                [this] { updateScaledPixmap(Qt::SmoothTransformation); });
+    }
+    m_smoothTimer->start(kSmoothRescaleDelayMs);
 }

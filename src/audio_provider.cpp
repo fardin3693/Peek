@@ -1,6 +1,7 @@
 #include "audio_provider.h"
 
 #include "audio_preview.h"
+#include "preview_util.h"
 
 #include <QAudioOutput>
 #include <QHBoxLayout>
@@ -15,18 +16,7 @@
 namespace
 {
 
-// Formats milliseconds as m:ss for the playback-position indicator. Shared
-// layout with the video player, which has identical controls.
-QString formatMediaTime(qint64 ms)
-{
-    if (ms < 0) {
-        ms = 0;
-    }
-    const qint64 totalSeconds = ms / 1000;
-    return QStringLiteral("%1:%2")
-        .arg(totalSeconds / 60)
-        .arg(totalSeconds % 60, 2, 10, QLatin1Char('0'));
-}
+using peek_util::formatMediaTime;
 
 } // namespace
 
@@ -42,16 +32,14 @@ bool renderAudioPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *l
     }
     // Parent views to the host widget owning the layout so Qt destroys them
     // with the window; the dispatch layer tracks them via object names.
-    QWidget *host = layout->parentWidget();
-    if (host == nullptr) {
-        host = qobject_cast<QWidget *>(statusLabel->parent());
-    }
+    QWidget *host = peek_util::hostWidget(layout, statusLabel);
     // Streaming playback like video, but with no video output: QMediaPlayer
     // reads through the FFmpeg backend and never loads the whole file into
     // memory. Playback starts paused; the user opts in with the Play button.
     // The player is independent of the video player so the two backends can
     // never share state across repeated previews.
     auto *player = new QMediaPlayer(host);
+    player->setObjectName(QStringLiteral("audioPlayer"));
     auto *audio = new QAudioOutput(host);
     player->setAudioOutput(audio);
     player->setSource(QUrl::fromLocalFile(path));
@@ -104,7 +92,7 @@ bool renderAudioPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *l
     QObject::connect(player, &QMediaPlayer::durationChanged, host,
                      [player, seekSlider, positionLabel](qint64 duration) {
                          if (seekSlider != nullptr) {
-                             seekSlider->setRange(0, static_cast<int>(qMax<qint64>(duration, 0)));
+                             seekSlider->setRange(0, peek_util::clampMsForSlider(duration));
                          }
                          if (positionLabel != nullptr && player != nullptr) {
                              positionLabel->setText(formatMediaTime(player->position()) +
@@ -118,7 +106,7 @@ bool renderAudioPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *l
                              return;
                          }
                          if (seekSlider != nullptr && !seekSlider->isSliderDown()) {
-                             seekSlider->setValue(static_cast<int>(position));
+                             seekSlider->setValue(peek_util::clampMsForSlider(position));
                          }
                          if (positionLabel != nullptr) {
                              positionLabel->setText(formatMediaTime(position) +

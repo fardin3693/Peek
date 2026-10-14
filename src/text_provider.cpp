@@ -1,5 +1,6 @@
 #include "text_provider.h"
 
+#include "preview_util.h"
 #include "text_preview.h"
 
 #include <QFontDatabase>
@@ -35,10 +36,7 @@ bool renderTextPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *la
 
     // Parent views to the host widget owning the layout so Qt destroys them
     // with the window; the dispatch layer tracks them via object names.
-    QWidget *host = layout->parentWidget();
-    if (host == nullptr) {
-        host = qobject_cast<QWidget *>(statusLabel->parent());
-    }
+    QWidget *host = peek_util::hostWidget(layout, statusLabel);
     auto *textView = new QPlainTextEdit(host);
     textView->setObjectName(QStringLiteral("textView"));
     textView->setReadOnly(true);

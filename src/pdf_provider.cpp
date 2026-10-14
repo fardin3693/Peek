@@ -1,6 +1,7 @@
 #include "pdf_provider.h"
 
 #include "pdf_preview.h"
+#include "preview_util.h"
 
 #include <QLabel>
 #include <QPixmap>
@@ -42,10 +43,7 @@ bool renderPdfPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *lay
     // Parent the view to the host widget owning the layout so Qt destroys it
     // with the window; the dispatch layer tracks it via the object name and
     // caches the original pixmap for resize scaling.
-    QWidget *host = layout->parentWidget();
-    if (host == nullptr) {
-        host = qobject_cast<QWidget *>(statusLabel->parent());
-    }
+    QWidget *host = peek_util::hostWidget(layout, statusLabel);
     auto *imageLabel = new QLabel(host);
     imageLabel->setObjectName(QStringLiteral("imageLabel"));
     imageLabel->setAlignment(Qt::AlignCenter);

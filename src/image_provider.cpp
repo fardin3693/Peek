@@ -1,4 +1,5 @@
 #include "image_provider.h"
+#include "preview_util.h"
 
 #include <QFileInfo>
 #include <QImage>
@@ -13,21 +14,6 @@
 
 namespace
 {
-
-constexpr int kMaxDecodeDimension = 2048;
-
-// Shrink-only fit of `original` inside `bounds`, mirroring
-// PreviewWindow::fittedSize: small images are never upscaled.
-QSize fittedDecodeSize(const QSize &original, const QSize &bounds)
-{
-    if (original.isEmpty() || bounds.isEmpty()) {
-        return original;
-    }
-    if (original.width() <= bounds.width() && original.height() <= bounds.height()) {
-        return original;
-    }
-    return original.scaled(bounds, Qt::KeepAspectRatio);
-}
 
 const QSet<QString> &supportedImageExtensions()
 {
@@ -55,24 +41,12 @@ bool renderImagePreview(const QString &path, QLabel *statusLabel, QVBoxLayout *l
     if (statusLabel == nullptr || layout == nullptr) {
         return false;
     }
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    const QSize nativeSize = reader.size();
-    if (nativeSize.isValid() && !nativeSize.isEmpty()) {
-        const QSize decodeSize =
-            fittedDecodeSize(nativeSize, QSize(kMaxDecodeDimension, kMaxDecodeDimension));
-        if (decodeSize != nativeSize) {
-            reader.setScaledSize(decodeSize);
-        }
-    }
-    QImage image = reader.read();
+    // Bounded decode shared with Markdown image resources: capped up
+    // front when the native size is known, bounded request + post-decode
+    // shrink when it is not (see preview_util.h for the residual risk note).
+    QString detail;
+    QImage image = peek_util::loadBoundedImage(path, &detail);
     if (image.isNull()) {
-        // Claimed but undecodable: the claim stands, so report through the
-        // image status line instead of falling through to another preview.
-        QString detail = reader.errorString();
-        if (detail.isEmpty()) {
-            detail = QStringLiteral("unreadable or corrupt");
-        }
         statusLabel->setText(QStringLiteral("Could not load an image preview of this "
                                             "file (%1).")
                                  .arg(detail));
@@ -85,7 +59,7 @@ bool renderImagePreview(const QString &path, QLabel *statusLabel, QVBoxLayout *l
         return false;
     }
     const QSize imageSize = original.size();
-    QString format = QString::fromLatin1(reader.format()).toUpper();
+    QString format = QString::fromLatin1(QImageReader::imageFormat(path)).toUpper();
     if (format.isEmpty()) {
         format = QStringLiteral("IMAGE");
     }
@@ -97,10 +71,7 @@ bool renderImagePreview(const QString &path, QLabel *statusLabel, QVBoxLayout *l
     // Parent the view to the host widget owning the layout so Qt destroys it
     // with the window; the dispatch layer tracks it via the object name and
     // caches the original pixmap for resize scaling.
-    QWidget *host = layout->parentWidget();
-    if (host == nullptr) {
-        host = qobject_cast<QWidget *>(statusLabel->parent());
-    }
+    QWidget *host = peek_util::hostWidget(layout, statusLabel);
     auto *imageLabel = new QLabel(host);
     imageLabel->setObjectName(QStringLiteral("imageLabel"));
     imageLabel->setAlignment(Qt::AlignCenter);

@@ -11,8 +11,11 @@
 // Markdown support (QTextDocument::setMarkdown, GitHub dialect with
 // MarkdownNoHTML) into a read-only text view with navigation disabled, so raw
 // HTML in the source is shown escaped and links/images never fetch or open.
-// A Markdown claim ends dispatch even when the file cannot be rendered, so
-// invalid Markdown never falls through to an unrelated preview.
+// Images load only from inside the document directory (relative URLs resolve
+// against the document, never the cwd; absolute file: URLs outside it map to
+// a placeholder) through the shared 2048 px bounded decoder. A Markdown
+// claim ends dispatch even when the file cannot be rendered, so invalid
+// Markdown never falls through to an unrelated preview.
 ProviderSupport markdownProviderSupports(const QString &path);
 bool renderMarkdownPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *layout);
 

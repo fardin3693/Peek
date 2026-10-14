@@ -15,8 +15,8 @@ For files, the window dispatches by extension in a fixed order — PDF, then Mar
 ### Image
 
 - Decoded with Qt's `QImageReader` (EXIF auto-transform). Which formats can be read depends on the installed Qt image plugins; PNG, JPEG, and WebP are covered by automated tests.
-- The window shows the file name, absolute path, dimensions, and detected format. The image scales to the window while preserving aspect ratio (`KeepAspectRatio`, `SmoothTransformation`) and updates on resize.
-- Large images are downscaled at decode time (longest side capped at 2048 px) and the initial window is capped at 1024×768.
+- The window shows the file name, absolute path, dimensions, and detected format. The image scales to the window while preserving aspect ratio (`KeepAspectRatio`, fast previews during resize with one debounced smooth pass) and updates on resize.
+- Large images are downscaled at decode time (longest side capped at 2048 px via the shared bounded decoder; size-unknown formats get a bounded request plus a post-decode shrink) and the initial window is capped at 1024×768.
 - Files no image plugin can read show `No image preview is available for this file.`; unreadable or corrupt images show `Could not load an image preview of this file (…).` instead of crashing.
 
 ### PDF (first page only, requires the Poppler backend)
@@ -24,6 +24,7 @@ For files, the window dispatches by extension in a fixed order — PDF, then Mar
 - A file counts as PDF only when it has a `.pdf` suffix (case-insensitive) **and** a `%PDF-` magic header; a bare extension never suffices.
 - Renders page 1 at up to 2048 px on the longest side (DPI capped at 300). The status line reads `PDF document — page 1 of N — W × H px`.
 - Password-protected, corrupt, empty, and otherwise unreadable documents stay on the PDF status line (for example, `Could not load a PDF preview of this file (password-protected (password required)).`); they never fall through to the image preview.
+- Trust note: Poppler/FFmpeg are trusted decoder C/C++ code decoding untrusted input — parser CVEs keep arriving upstream. PDF preview is an opt-out risk surface: configure with `-DPEEK_WITH_PDF=OFF` to disable it, and track Poppler security releases.
 
 ### Plain text
 
@@ -35,7 +36,7 @@ For files, the window dispatches by extension in a fixed order — PDF, then Mar
 
 - Recognized by extension only (case-insensitive): `md markdown`. Rendered through Qt's built-in Markdown support (`QTextDocument::setMarkdown`, GitHub dialect) into a read-only view with a `Markdown file — L lines — B bytes` status line; empty files report `Markdown file — empty (N bytes)`. Markdown files never render as plain text, and invalid/unreadable Markdown stays on the Markdown status line (`Could not load a Markdown preview of this file (…).`).
 - Supported: headings, paragraphs, ordered/unordered lists, bold/italic, inline code and fenced code blocks, blockquotes, links (shown, never followed), horizontal rules, and GitHub-style tables. Unsupported: raw embedded HTML (shown escaped as literal text, never rendered), task-list checkboxes, footnotes, strikethrough extensions beyond Qt's dialect, embedded images fetched from the network, and automatic link opening.
-- Security: treated as untrusted input — loaded through the same bounded 2 MiB, strict-UTF-8, NUL-rejecting path as plain text; rendered with `MarkdownNoHTML` so raw HTML cannot inject markup or scripts; the view never follows links (`openLinks`/`openExternalLinks` off, empty search paths) and never fetches remote images or stylesheets (non-local resource loads resolve empty; local-file images may still render when already on disk).
+- Security: treated as untrusted input — loaded through the same bounded 2 MiB, strict-UTF-8, NUL-rejecting path as plain text; rendered with `MarkdownNoHTML` so raw HTML cannot inject markup or scripts; the view never follows links (`openLinks`/`openExternalLinks` off, search paths limited to the document directory) and never fetches remote images or stylesheets (non-local resource loads resolve empty; local images render only from inside the document directory through the shared 2048 px bounded decoder — relative URLs resolve against the document, never the working directory, and absolute `file:` URLs outside it render as placeholders).
 - Same 640×480 window sizing as text; Escape dismissal unchanged.
 
 ### Video (streaming, requires the Qt Multimedia backend)
@@ -171,7 +172,7 @@ See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installati
 - Run the `asan` preset (`cmake --preset asan && cmake --build --preset asan && env ASAN_OPTIONS=detect_leaks=1 ctest --preset asan`) before submitting changes that touch memory handling. LeakSanitizer needs an environment that permits its process inspection; do not claim leak checks passed if it cannot run.
 - Tests use `QT_QPA_PLATFORM=offscreen` and an empty `QT_QPA_PLATFORMTHEME` only in child test processes. They do not require a desktop session or change desktop configuration. Valid-CLI subprocess tests check event-loop lifetime and then terminate the child; leak checks for graceful widget destruction are covered by the native test process, not these terminated children.
 - Format with `clang-format -i src/*.cpp src/*.h tests/*.cpp`.
-- Static analysis: configure any preset (it exports `compile_commands.json`), then run `clang-tidy -p build/debug src/main.cpp`.
+- Static analysis: configure any preset (it exports `compile_commands.json`), then run `clang-tidy -p build/debug src/main.cpp`. The `peek_tidy` build target (`cmake --build --preset debug --target peek_tidy`) runs the same committed `.clang-tidy` config as a pre-submit gate. Developer rebuilds use `ccache` automatically when it is installed (CMake `CMAKE_CXX_COMPILER_LAUNCHER`, never a hard requirement).
 - Keep changes small and update `docs/architecture.md` when module boundaries change.
 
 See [docs/architecture.md](docs/architecture.md) for the implemented design and planned direction.
