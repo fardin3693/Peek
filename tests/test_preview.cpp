@@ -1,3 +1,5 @@
+#include "archive_preview.h"
+#include "archive_provider.h"
 #include "audio_preview.h"
 #include "image_provider.h"
 #include "markdown_preview.h"
@@ -20,8 +22,10 @@
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
+#include <QSet>
 #include <QSlider>
 #include <QStandardPaths>
+#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBrowser>
@@ -205,6 +209,160 @@ void checkWindow(const PreviewRequest &request, QString name = {})
         QCOMPARE(label->textFormat(), Qt::PlainText);
         QVERIFY(label->wordWrap());
     }
+}
+
+// Minimal stored-only ZIP writer for archive tests: method 0 needs no
+// compression library, and the preview under test never reads entry data, so
+// fixtures stay small and dependency-free. Central-directory fields are
+// authoritative for the parser, exactly like archives real writers produce.
+struct TestZipEntry {
+    QString name;
+    QByteArray data;
+    bool isDirectory = false;
+    bool encrypted = false;
+    bool forceSizes = false;
+    quint32 forcedUncompressed = 0;
+    quint32 forcedCompressed = 0;
+};
+
+quint32 testZipCrc32(const QByteArray &data)
+{
+    static quint32 table[256] = {};
+    static bool ready = false;
+    if (!ready) {
+        for (quint32 i = 0; i < 256; ++i) {
+            quint32 c = i;
+            for (int k = 0; k < 8; ++k) {
+                c = (c & 1u) != 0u ? 0xEDB88320u ^ (c >> 1u) : c >> 1u;
+            }
+            table[i] = c;
+        }
+        ready = true;
+    }
+    quint32 crc = 0xFFFFFFFFu;
+    for (char ch : data) {
+        crc = table[(crc ^ static_cast<quint8>(ch)) & 0xFFu] ^ (crc >> 8u);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+QByteArray buildTestZip(const QList<TestZipEntry> &entries)
+{
+    QByteArray blob;
+    auto putU16 = [&](quint16 value) {
+        blob.append(static_cast<char>(value & 0xFFu));
+        blob.append(static_cast<char>((value >> 8u) & 0xFFu));
+    };
+    auto putU32 = [&](quint32 value) {
+        for (int shift = 0; shift < 32; shift += 8) {
+            blob.append(static_cast<char>((value >> shift) & 0xFFu));
+        }
+    };
+    QList<quint32> localOffsets;
+    for (const TestZipEntry &entry : entries) {
+        const QByteArray name = entry.name.toUtf8();
+        bool useUtf8 = false;
+        for (QChar c : entry.name) {
+            if (c.unicode() > 0xFFu) {
+                useUtf8 = true;
+            }
+        }
+        quint16 flags = 0;
+        if (entry.encrypted) {
+            flags |= 0x0001u;
+        }
+        if (useUtf8) {
+            flags |= 0x0800u;
+        }
+        localOffsets.append(static_cast<quint32>(blob.size()));
+        putU32(0x04034b50u); // Local file header.
+        putU16(20);
+        putU16(flags);
+        putU16(0); // Method 0: stored, no decompression needed anywhere.
+        putU16(0);
+        putU16(0x21u);
+        putU32(testZipCrc32(entry.data));
+        putU32(static_cast<quint32>(entry.data.size()));
+        putU32(static_cast<quint32>(entry.data.size()));
+        putU16(static_cast<quint16>(name.size()));
+        putU16(0);
+        blob.append(name);
+        blob.append(entry.data);
+    }
+    const quint32 centralOffset = static_cast<quint32>(blob.size());
+    for (int i = 0; i < entries.size(); ++i) {
+        const TestZipEntry &entry = entries.at(i);
+        const QByteArray name = entry.name.toUtf8();
+        bool useUtf8 = false;
+        for (QChar c : entry.name) {
+            if (c.unicode() > 0xFFu) {
+                useUtf8 = true;
+            }
+        }
+        quint16 flags = 0;
+        if (entry.encrypted) {
+            flags |= 0x0001u;
+        }
+        if (useUtf8) {
+            flags |= 0x0800u;
+        }
+        putU32(0x02014b50u); // Central directory header.
+        putU16(20);
+        putU16(20);
+        putU16(flags);
+        putU16(0);
+        putU16(0);
+        putU16(0x21u);
+        putU32(testZipCrc32(entry.data));
+        putU32(entry.forceSizes ? entry.forcedCompressed : static_cast<quint32>(entry.data.size()));
+        putU32(entry.forceSizes ? entry.forcedUncompressed
+                                : static_cast<quint32>(entry.data.size()));
+        putU16(static_cast<quint16>(name.size()));
+        putU16(0);
+        putU16(0);
+        putU16(0);
+        putU16(0);
+        putU32(entry.isDirectory ? 0x10u : 0u); // DOS directory attribute.
+        putU32(localOffsets.at(i));
+        blob.append(name);
+    }
+    const quint32 centralSize = static_cast<quint32>(blob.size()) - centralOffset;
+    putU32(0x06054b50u); // End of central directory.
+    putU16(0);
+    putU16(0);
+    putU16(static_cast<quint16>(entries.size()));
+    putU16(static_cast<quint16>(entries.size()));
+    putU32(centralSize);
+    putU32(centralOffset);
+    putU16(0);
+    return blob;
+}
+
+// Overwrites EOCD bytes at `fieldOffset` (12 = central size, 16 = central
+// offset; u16 count fields at 8/10 need a 2-byte patch) to craft hostile or
+// unsupported declarations on top of an otherwise valid archive.
+QByteArray withPatchedEocd(const QByteArray &zip, int fieldOffset, const QByteArray &patch)
+{
+    QByteArray out = zip;
+    const int eocd = out.lastIndexOf(QByteArray("\x50\x4b\x05\x06", 4));
+    Q_ASSERT(eocd >= 0);
+    Q_ASSERT(eocd + fieldOffset + patch.size() <= out.size());
+    for (int i = 0; i < patch.size(); ++i) {
+        out[eocd + fieldOffset + i] = patch.at(i);
+    }
+    return out;
+}
+
+int findArchiveRow(QTableWidget *view, const QString &name)
+{
+    Q_ASSERT(view != nullptr);
+    for (int row = 0; row < view->rowCount(); ++row) {
+        QTableWidgetItem *item = view->item(row, kArchiveNameColumn);
+        if (item != nullptr && item->text() == name) {
+            return row;
+        }
+    }
+    return -1;
 }
 
 } // namespace
@@ -2821,6 +2979,504 @@ class PreviewTests : public QObject
         QCOMPARE(peek_util::clampMsForSlider(0), 0);
         QCOMPARE(peek_util::clampMsForSlider(1234), 1234);
         QCOMPARE(peek_util::clampMsForSlider(static_cast<qint64>(INT_MAX) + 1000LL), INT_MAX);
+    }
+
+    void archiveProviderSupports_data()
+    {
+        QTest::addColumn<QString>("fileName");
+        QTest::addColumn<bool>("supported");
+        QTest::newRow("zip") << QStringLiteral("archive.zip") << true;
+        QTest::newRow("uppercase-zip") << QStringLiteral("ARCHIVE.ZIP") << true;
+        QTest::newRow("mixed-case") << QStringLiteral("Archive.ZiP") << true;
+        QTest::newRow("txt") << QStringLiteral("notes.txt") << false;
+        QTest::newRow("md") << QStringLiteral("notes.md") << false;
+        QTest::newRow("png") << QStringLiteral("photo.png") << false;
+        QTest::newRow("pdf") << QStringLiteral("doc.pdf") << false;
+        QTest::newRow("mp3") << QStringLiteral("sound.mp3") << false;
+        QTest::newRow("mp4") << QStringLiteral("clip.mp4") << false;
+        QTest::newRow("bin") << QStringLiteral("notes.bin") << false;
+        QTest::newRow("no-extension") << QStringLiteral("archive") << false;
+        QTest::newRow("zip-suffix-not-final") << QStringLiteral("archive.zip.txt") << false;
+        QTest::newRow("text-suffix-archive") << QStringLiteral("notes.txt.zip") << true;
+    }
+
+    void archiveProviderSupports()
+    {
+        QFETCH(QString, fileName);
+        QFETCH(bool, supported);
+        const auto expected = supported ? ProviderSupport::Yes : ProviderSupport::No;
+        QCOMPARE(archiveProvider().supports(fileName), expected);
+        QCOMPARE(::archiveProviderSupports(fileName), expected);
+        QCOMPARE(isArchiveFile(fileName), supported);
+    }
+
+    void archiveProviderSupportsIsCheap()
+    {
+        // Identification is extension-only: missing files with a ZIP suffix
+        // are still claimed, proving no archive bytes are read in supports().
+        QCOMPARE(archiveProvider().supports(QStringLiteral("/nonexistent/archive.ZIP")),
+                 ProviderSupport::Yes);
+        QCOMPARE(archiveProvider().supports(QStringLiteral("/nonexistent/notes.txt")),
+                 ProviderSupport::No);
+        QCOMPARE(archiveProvider().supports(QStringLiteral("archive.zip.txt")),
+                 ProviderSupport::No);
+    }
+
+    void archiveProviderRenderNullGuards()
+    {
+        // Null widgets must not crash: render refuses safely.
+        QCOMPARE(archiveProvider().render(QStringLiteral("archive.zip"), nullptr, nullptr), false);
+    }
+
+    void archiveListsFilesAndDirectories()
+    {
+        QCOMPARE(QLatin1String(archiveProvider().name), QLatin1String("archive"));
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("sample.zip"));
+        const QList<TestZipEntry> specs = {
+            {QStringLiteral("readme.txt"), QByteArray("hello peek\n"), false, false},
+            {QStringLiteral("docs/"), {}, true, false},
+            {QStringLiteral("docs/nested/guide.txt"), QByteArray("nested\n"), false, false},
+            {QStringLiteral("attrdir"), {}, true, false},
+            {QStringLiteral("empty.bin"), {}, false, false},
+            {QStringLiteral("café 日本語 😀.txt"), QByteArray("unicode name\n"), false, false},
+        };
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray zip = buildTestZip(specs);
+        QVERIFY(file.write(zip) == zip.size());
+        file.close();
+        QCOMPARE(archiveProvider().supports(path), ProviderSupport::Yes);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isArchivePreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isMarkdownPreview());
+        QVERIFY(!window.isVideoPreview());
+        auto *view = window.findChild<QTableWidget *>(QStringLiteral("archiveView"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(view != nullptr);
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QCOMPARE(view->columnCount(), kArchiveColumnCount);
+        QCOMPARE(view->rowCount(), specs.size());
+        QVERIFY(status->text().contains(QStringLiteral("ZIP archive")));
+        QVERIFY(status->text().contains(QStringLiteral("6 entries")));
+
+        // Files report both sizes; the empty file reports zeros.
+        int row = findArchiveRow(view, QStringLiteral("readme.txt"));
+        QVERIFY(row >= 0);
+        QCOMPARE(view->item(row, kArchiveTypeColumn)->text(), QStringLiteral("file"));
+        QCOMPARE(view->item(row, kArchiveUncompressedColumn)->text(),
+                 QString::number(QByteArray("hello peek\n").size()));
+        QCOMPARE(view->item(row, kArchiveCompressedColumn)->text(),
+                 QString::number(QByteArray("hello peek\n").size()));
+        row = findArchiveRow(view, QStringLiteral("empty.bin"));
+        QVERIFY(row >= 0);
+        QCOMPARE(view->item(row, kArchiveUncompressedColumn)->text(), QStringLiteral("0"));
+
+        // Nested paths keep their relative spelling; directories (trailing
+        // slash or attribute-only) show as directories with no sizes.
+        row = findArchiveRow(view, QStringLiteral("docs/nested/guide.txt"));
+        QVERIFY(row >= 0);
+        QCOMPARE(view->item(row, kArchiveTypeColumn)->text(), QStringLiteral("file"));
+        row = findArchiveRow(view, QStringLiteral("docs/"));
+        QVERIFY(row >= 0);
+        QCOMPARE(view->item(row, kArchiveTypeColumn)->text(), QStringLiteral("directory"));
+        QCOMPARE(view->item(row, kArchiveUncompressedColumn)->text(), QStringLiteral("—"));
+        row = findArchiveRow(view, QStringLiteral("attrdir"));
+        QVERIFY(row >= 0);
+        QCOMPARE(view->item(row, kArchiveTypeColumn)->text(), QStringLiteral("directory"));
+
+        // Unicode filenames survive the round trip.
+        QVERIFY(findArchiveRow(view, QStringLiteral("café 日本語 😀.txt")) >= 0);
+
+        // Totals accumulate every entry: 11 + 7 + 0 + 0 + 0 + 13 bytes.
+        quint64 expectedTotal = 0;
+        for (const TestZipEntry &spec : specs) {
+            expectedTotal += static_cast<quint64>(spec.data.size());
+        }
+        const ArchiveListingResult direct = listZipEntries(path);
+        QVERIFY(direct.error.isEmpty());
+        QCOMPARE(direct.totalUncompressedSize, expectedTotal);
+        QVERIFY(status->text().contains(QString::number(expectedTotal)));
+
+        // The listing is read-only: nothing to edit, activate, or open.
+        QCOMPARE(view->editTriggers(), QAbstractItemView::NoEditTriggers);
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+        QVERIFY2(window.width() <= 1024, "Archive preview must respect the window width cap.");
+        QVERIFY2(window.height() <= 768, "Archive preview must respect the window height cap.");
+    }
+
+    void archiveEmptyArchive()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("empty.zip"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray zip = buildTestZip({});
+        QVERIFY(file.write(zip) == zip.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isArchivePreview());
+        auto *view = window.findChild<QTableWidget *>(QStringLiteral("archiveView"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(view != nullptr);
+        QVERIFY(status != nullptr);
+        QCOMPARE(view->rowCount(), 0);
+        QVERIFY(status->text().contains(QStringLiteral("empty")));
+        QVERIFY(status->text().contains(QStringLiteral("0 entries")));
+    }
+
+    void archiveCorruptKeepsClaim_data()
+    {
+        QTest::addColumn<QString>("kind");
+        QTest::newRow("garbage") << QStringLiteral("garbage");
+        QTest::newRow("truncated") << QStringLiteral("truncated");
+    }
+
+    void archiveCorruptKeepsClaim()
+    {
+        QFETCH(QString, kind);
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("broken.zip"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        if (kind == QStringLiteral("garbage")) {
+            const QByteArray garbage("this is not a ZIP archive at all");
+            QVERIFY(file.write(garbage) == garbage.size());
+        } else {
+            const QByteArray zip = buildTestZip({
+                {QStringLiteral("a.txt"), QByteArray("aaa\n"), false, false},
+                {QStringLiteral("b.txt"), QByteArray("bbb\n"), false, false},
+            });
+            const QByteArray half = zip.left(zip.size() / 2);
+            QVERIFY(file.write(half) == half.size());
+        }
+        file.close();
+        QCOMPARE(archiveProvider().supports(path), ProviderSupport::Yes);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        // A claimed but unreadable archive stays claimed: the archive status
+        // message stands, no view is created, and nothing falls through to
+        // text, image, or the generic path with a misleading message.
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isArchivePreview());
+        QVERIFY(!window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(window.findChild<QTableWidget *>(QStringLiteral("archiveView")) == nullptr);
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) == nullptr);
+        QVERIFY(window.findChild<QPlainTextEdit *>(QStringLiteral("textView")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("Could not load an archive preview")));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+    }
+
+    void archiveEncryptedEntriesListed()
+    {
+        // The encryption flag is honored as metadata only: the entry is listed
+        // with an indicator and never decrypted, extracted, or opened.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("locked.zip"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray zip = buildTestZip({
+            {QStringLiteral("secret.txt"), QByteArray("s3cret\n"), false, true},
+            {QStringLiteral("plain.txt"), QByteArray("plain\n"), false, false},
+        });
+        QVERIFY(file.write(zip) == zip.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isArchivePreview());
+        auto *view = window.findChild<QTableWidget *>(QStringLiteral("archiveView"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(view != nullptr);
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("ZIP archive")));
+        QCOMPARE(view->rowCount(), 2);
+        const int row = findArchiveRow(view, QStringLiteral("secret.txt"));
+        QVERIFY(row >= 0);
+        QVERIFY(view->item(row, kArchiveTypeColumn)->text().contains(QStringLiteral("encrypted")));
+        const int plain = findArchiveRow(view, QStringLiteral("plain.txt"));
+        QVERIFY(plain >= 0);
+        QVERIFY(
+            !view->item(plain, kArchiveTypeColumn)->text().contains(QStringLiteral("encrypted")));
+    }
+
+    void archiveZip64Unsupported()
+    {
+        // A ZIP64 sentinel in the EOCD is recognized and declined with a
+        // message instead of being parsed speculatively.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("zip64.zip"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QByteArray zip = buildTestZip({
+            {QStringLiteral("a.txt"), QByteArray("aaa\n"), false, false},
+        });
+        zip = withPatchedEocd(zip, 8, QByteArray("\xFF\xFF", 2));
+        QVERIFY(file.write(zip) == zip.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isArchivePreview());
+        QVERIFY(window.findChild<QTableWidget *>(QStringLiteral("archiveView")) == nullptr);
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("Could not load an archive preview")));
+        QVERIFY(status->text().contains(QStringLiteral("ZIP64")));
+    }
+
+    void archiveEntryCountLimit()
+    {
+        // Past kMaxZipEntries enumeration stops with a truncated listing:
+        // bounded widgets, bounded memory, and an honest status line.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("many.zip"));
+        QList<TestZipEntry> specs;
+        const int wanted = kMaxZipEntries + 5;
+        for (int i = 0; i < wanted; ++i) {
+            specs.append(
+                {QStringLiteral("file-%1.txt").arg(i, 5, 10, QLatin1Char('0')), {}, false, false});
+        }
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray zip = buildTestZip(specs);
+        QVERIFY(file.write(zip) == zip.size());
+        file.close();
+
+        const ArchiveListingResult direct = listZipEntries(path);
+        QVERIFY(direct.error.isEmpty());
+        QVERIFY(direct.truncated);
+        QCOMPARE(direct.entries.size(), kMaxZipEntries);
+        QCOMPARE(direct.declaredEntryCount, static_cast<quint64>(wanted));
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isArchivePreview());
+        auto *view = window.findChild<QTableWidget *>(QStringLiteral("archiveView"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(view != nullptr);
+        QVERIFY(status != nullptr);
+        QCOMPARE(view->rowCount(), kMaxZipEntries);
+        QVERIFY(status->text().contains(QStringLiteral("showing first")));
+    }
+
+    void archiveOversizedCentralDir()
+    {
+        // A hostile central-directory size declaration is rejected before any
+        // large allocation: the read is bounded, the message is clear.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("huge.zip"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QByteArray zip = buildTestZip({
+            {QStringLiteral("a.txt"), QByteArray("aaa\n"), false, false},
+        });
+        const quint32 hostile = 100u * 1024u * 1024u;
+        QByteArray patch;
+        for (int shift = 0; shift < 32; shift += 8) {
+            patch.append(static_cast<char>((hostile >> shift) & 0xFFu));
+        }
+        zip = withPatchedEocd(zip, 12, patch);
+        QVERIFY(file.write(zip) == zip.size());
+        file.close();
+
+        const ArchiveListingResult direct = listZipEntries(path);
+        QVERIFY(!direct.error.isEmpty());
+        QVERIFY(direct.error.contains(QStringLiteral("too large")));
+        QVERIFY(direct.entries.isEmpty());
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isArchivePreview());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("Could not load an archive preview")));
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+    }
+
+    void archiveSizeTotalsDoNotOverflow()
+    {
+        // Two maximum 32-bit declared sizes accumulate in 64 bits: the summary
+        // shows 8589934590 instead of wrapping to 32-bit zero.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("big.zip"));
+        TestZipEntry first{QStringLiteral("first.bin"),
+                           QByteArray("x"),
+                           false,
+                           false,
+                           true,
+                           0xFFFFFFFFu,
+                           0xFFFFFFFFu};
+        TestZipEntry second{QStringLiteral("second.bin"),
+                            QByteArray("y"),
+                            false,
+                            false,
+                            true,
+                            0xFFFFFFFFu,
+                            0xFFFFFFFFu};
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray zip = buildTestZip({first, second});
+        QVERIFY(file.write(zip) == zip.size());
+        file.close();
+
+        const ArchiveListingResult direct = listZipEntries(path);
+        QVERIFY(direct.error.isEmpty());
+        QCOMPARE(direct.entries.size(), 2);
+        QCOMPARE(direct.totalUncompressedSize, 8589934590ull);
+        QCOMPARE(direct.totalCompressedSize, 8589934590ull);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isArchivePreview());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("8589934590")));
+    }
+
+    void archivePreviewDoesNotExtract()
+    {
+        // Previewing must not modify the archive and must not create files:
+        // the bytes are identical and the directory gains no entries.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("sealed.zip"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray zip = buildTestZip({
+            {QStringLiteral("inner/notes.txt"), QByteArray("do not extract\n"), false, false},
+            {QStringLiteral("inner/"), {}, true, false},
+        });
+        QVERIFY(file.write(zip) == zip.size());
+        file.close();
+        const QSet<QString> before =
+            QSet<QString>(QDir(fixtures.path()).entryList(QDir::NoDotAndDotDot).begin(),
+                          QDir(fixtures.path()).entryList(QDir::NoDotAndDotDot).end());
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        {
+            PreviewWindow window(result.request);
+            QVERIFY(window.isArchivePreview());
+            window.show();
+            QCoreApplication::processEvents();
+            QVERIFY(window.isVisible());
+            QVERIFY(window.close());
+        }
+
+        QFile check(path);
+        QVERIFY(check.open(QIODevice::ReadOnly));
+        QCOMPARE(check.readAll(), zip);
+        const QSet<QString> after =
+            QSet<QString>(QDir(fixtures.path()).entryList(QDir::NoDotAndDotDot).begin(),
+                          QDir(fixtures.path()).entryList(QDir::NoDotAndDotDot).end());
+        QCOMPARE(after, before);
+    }
+
+    void archiveLeavesOthersAlone()
+    {
+        // The archive provider claims only ZIP: text still renders as text,
+        // images still render as images, and no other provider claims .zip.
+        QCOMPARE(textProvider().supports(QStringLiteral("archive.zip")), ProviderSupport::No);
+        QCOMPARE(imageProvider().supports(QStringLiteral("archive.zip")), ProviderSupport::No);
+        QCOMPARE(isTextFile(QStringLiteral("archive.zip")), false);
+        QCOMPARE(isVideoFile(QStringLiteral("archive.zip")), false);
+        QCOMPARE(isAudioFile(QStringLiteral("archive.zip")), false);
+        QCOMPARE(isMarkdownFile(QStringLiteral("archive.zip")), false);
+        QCOMPARE(archiveProvider().supports(QStringLiteral("notes.txt")), ProviderSupport::No);
+        QCOMPARE(archiveProvider().supports(QStringLiteral("photo.png")), ProviderSupport::No);
+
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString textPath = fixtures.filePath(QStringLiteral("notes.txt"));
+        QFile textFile(textPath);
+        QVERIFY(textFile.open(QIODevice::WriteOnly));
+        const QByteArray words("still text\n");
+        QVERIFY(textFile.write(words) == words.size());
+        textFile.close();
+        const auto textResult = validatePreviewPath(textPath);
+        QVERIFY2(textResult.error.isEmpty(), qPrintable(textResult.error));
+        {
+            PreviewWindow window(textResult.request);
+            QVERIFY(window.isTextPreview());
+            QVERIFY(!window.isArchivePreview());
+        }
+
+        const QString imagePath = fixtures.filePath(QStringLiteral("photo.png"));
+        QVERIFY(writeTestImage(imagePath, QSize(64, 48), "png"));
+        const auto imageResult = validatePreviewPath(imagePath);
+        QVERIFY2(imageResult.error.isEmpty(), qPrintable(imageResult.error));
+        {
+            PreviewWindow window(imageResult.request);
+            QVERIFY(window.isImagePreview());
+            QVERIFY(!window.isArchivePreview());
+        }
+    }
+
+    void archiveEscapeClosesWindow()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("escape.zip"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray zip = buildTestZip({
+            {QStringLiteral("a.txt"), QByteArray("aaa\n"), false, false},
+        });
+        QVERIFY(file.write(zip) == zip.size());
+        file.close();
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+
+        PreviewWindow window(result.request);
+        QVERIFY(window.isArchivePreview());
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&window, 3000));
+        QVERIFY(window.isVisible());
+        QTest::keyClick(&window, Qt::Key_Escape);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 2000);
     }
 
 #ifdef PEEK_WITH_MULTIMEDIA

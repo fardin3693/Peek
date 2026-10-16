@@ -8,6 +8,7 @@ class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QSlider;
+class QTableWidget;
 class QTextBrowser;
 class QTimer;
 class QVBoxLayout;
@@ -41,6 +42,10 @@ class PreviewWindow : public QWidget
     // without PEEK_WITH_MULTIMEDIA, where audio extensions report as
     // unsupported instead.
     bool isAudioPreview() const;
+    // True when an archive file claimed the preview area: a read-only
+    // listing of its entries. Corrupt or unsupported archives keep the claim
+    // with a status message instead of falling through to another preview.
+    bool isArchivePreview() const;
     QSize originalImageSize() const;
 
     // Aspect-preserving fit of `original` inside `bounds` (Qt::KeepAspectRatio).
@@ -75,6 +80,9 @@ class PreviewWindow : public QWidget
     // Owned by the Markdown provider's view (parented to the window); cached
     // here after a successful render so isMarkdownPreview() stays O(1).
     QTextBrowser *m_markdownView = nullptr;
+    // Owned by the archive provider's view (parented to the window); cached
+    // here after a successful render so isArchivePreview() stays O(1).
+    QTableWidget *m_archiveView = nullptr;
     QPixmap m_original;
     // Last label size rendered with SmoothTransformation; fast drag previews
     // never update it so the debounced smooth pass still runs.

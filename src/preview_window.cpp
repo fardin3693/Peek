@@ -14,11 +14,13 @@
 #include <QResizeEvent>
 #include <QShortcut>
 #include <QSlider>
+#include <QTableWidget>
 #include <QTextBrowser>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include "archive_provider.h"
 #include "audio_preview.h"
 #include "image_provider.h"
 #include "markdown_provider.h"
@@ -107,12 +109,13 @@ PreviewWindow::PreviewWindow(const PreviewRequest &request, QWidget *parent) : Q
     bool showingMarkdown = false;
     bool showingVideo = false;
     bool showingAudio = false;
+    bool showingArchive = false;
     if (!request.isDirectory) {
         // Dispatch order: PDF, then Markdown, then text, then audio, then
-        // video, then the image provider, then the generic fallback. Each
-        // handler owns its status message; a claimed file never falls through
-        // to an unrelated preview. Audio and video extension sets are
-        // disjoint, so their relative order is arbitrary.
+        // video, then archive, then the image provider, then the generic
+        // fallback. Each handler owns its status message; a claimed file
+        // never falls through to an unrelated preview. Audio and video
+        // extension sets are disjoint, so their relative order is arbitrary.
         bool handled = false;
 #ifdef PEEK_WITH_PDF
         if (!handled && pdfProvider().supports(request.path) == ProviderSupport::Yes) {
@@ -187,6 +190,17 @@ PreviewWindow::PreviewWindow(const PreviewRequest &request, QWidget *parent) : Q
             handled = true;
         }
 #endif
+        if (!handled && archiveProvider().supports(request.path) == ProviderSupport::Yes) {
+            // Archive precedes image: render() builds the read-only entry
+            // listing and owns the status message. An archive claim ends
+            // dispatch even when the file is corrupt or unsupported, so bad
+            // archives never fall through to an unrelated preview.
+            showingArchive = archiveProvider().render(request.path, statusLabel, layout);
+            if (showingArchive) {
+                m_archiveView = findChild<QTableWidget *>(QStringLiteral("archiveView"));
+            }
+            handled = true;
+        }
         if (!handled && imageProvider().supports(request.path) == ProviderSupport::Yes) {
             // Image is the last provider: render() builds the view and owns
             // the status message. An image claim ends dispatch even when the
@@ -217,7 +231,7 @@ PreviewWindow::PreviewWindow(const PreviewRequest &request, QWidget *parent) : Q
         const int width = qBound(480, display.width(), kMaxWindowWidth);
         const int height = qBound(240, display.height() + kLabelAllowance, kMaxWindowHeight);
         resize(width, height);
-    } else if (showingText || showingMarkdown || showingVideo || showingAudio) {
+    } else if (showingText || showingMarkdown || showingVideo || showingAudio || showingArchive) {
         resize(640, 480);
     } else {
         resize(480, 240);
@@ -235,6 +249,8 @@ bool PreviewWindow::isImagePreview() const
 bool PreviewWindow::isTextPreview() const { return m_textView != nullptr; }
 
 bool PreviewWindow::isMarkdownPreview() const { return m_markdownView != nullptr; }
+
+bool PreviewWindow::isArchivePreview() const { return m_archiveView != nullptr; }
 
 bool PreviewWindow::isVideoPreview() const
 {

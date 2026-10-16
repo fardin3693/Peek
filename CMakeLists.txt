@@ -79,6 +79,10 @@ add_executable(peek
     src/preview_window.cpp
     src/preview_window.h
     src/preview_provider.h
+    src/archive_preview.cpp
+    src/archive_preview.h
+    src/archive_provider.cpp
+    src/archive_provider.h
     src/text_preview.cpp
     src/text_preview.h
     src/text_provider.cpp

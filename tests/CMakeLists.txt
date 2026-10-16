@@ -25,6 +25,8 @@ add_executable(peek_preview_tests
     ../src/text_provider.cpp
     ../src/markdown_preview.cpp
     ../src/markdown_provider.cpp
+    ../src/archive_preview.cpp
+    ../src/archive_provider.cpp
     ../src/image_provider.cpp
     ../src/video_preview.cpp
     ../src/audio_preview.cpp

@@ -6,11 +6,11 @@ Target platform: Linux desktops, developed first on Omarchy (Arch Linux, Hyprlan
 
 ## Status
 
-**Native previews for image, PDF, Markdown, plain text, video, and audio files, plus a minimal Nautilus selection handoff.**
+**Native previews for image, PDF, Markdown, plain text, video, audio, and ZIP archive files, plus a minimal Nautilus selection handoff.**
 
 Peek is a native C++17 application built on Qt 6 Widgets (see [docs/architecture.md](docs/architecture.md)). `peek PATH` validates a local file or directory and opens one decorated preview window; Escape or the ordinary window close action dismisses it and exits Peek. With no arguments, Peek prints version/platform information and brief usage, then exits successfully. `--help` and `--version` remain available.
 
-For files, the window dispatches by extension in a fixed order — PDF, then Markdown, then plain text, then audio, then video, then image — and each handler owns its status message. A file claimed by one handler never falls through to an unrelated preview. Media playback streams through the Qt Multimedia backend and never loads whole files into memory.
+For files, the window dispatches by extension in a fixed order — PDF, then Markdown, then plain text, then audio, then video, then archive, then image — and each handler owns its status message. A file claimed by one handler never falls through to an unrelated preview. Media playback streams through the Qt Multimedia backend and never loads whole files into memory.
 
 ### Image
 
@@ -50,6 +50,13 @@ For files, the window dispatches by extension in a fixed order — PDF, then Mar
 - Recognized by extension only (case-insensitive): `mp3 wav flac ogg opus m4a aac wma`. Unknown extensions stay on their existing preview paths. The audio and video extension sets are disjoint (`m4a` ≠ `m4v`).
 - Same streaming `QMediaPlayer` + `QAudioOutput` backend as video but with no video output: a centered label plus Play/Pause button, seek slider, and `m:ss / m:ss` duration indicator, starting paused. Closing stops playback and clears the source. Failures stay on the audio controls as `Could not play this audio (…)`; without the backend, audio extensions report `No audio preview is available for this file (Qt Multimedia is not installed).`
 
+### Archive (ZIP listing, no new dependencies)
+
+- Recognized by extension only (case-insensitive): `zip`. Unknown extensions stay on their existing preview paths. No archive library is used: listing parses only the end-of-central-directory record and the central directory with Qt Core, so entry contents are never decompressed and no backend is needed.
+- Shows a read-only table in archive order (name, file/directory type, uncompressed and compressed sizes) with a `ZIP archive — N entries — T bytes uncompressed — S bytes compressed` status line; empty archives report `ZIP archive — empty (0 entries)`. Directories show no sizes; encrypted entries are listed with an `(encrypted)` marker and never decrypted.
+- Security: archives are treated as untrusted input — entry contents are never read, extracted, executed, or opened, and nothing is written to the filesystem, so archived paths cannot escape anywhere. Corrupt, truncated, ZIP64, multi-disk, and over-limit archives stay on the archive status line (`Could not load an archive preview of this file (…).`). Limits: at most 10000 entries enumerated (larger archives show `showing first L of N`), central directory capped at 8 MiB, entry names capped at 4096 bytes, totals accumulated in saturating 64-bit integers.
+- Same 640×480 window sizing as text; Escape dismissal unchanged. TAR, 7z, and RAR are not supported (libarchive remains the candidate backend if broader format support is ever requested).
+
 ### Unsupported files and directories
 
 - Directories show the `Directory preview not implemented yet.` placeholder; their contents are not scanned.
@@ -58,9 +65,9 @@ For files, the window dispatches by extension in a fixed order — PDF, then Mar
 
 ### Not yet implemented
 
-Archives, office documents, Markdown rendering, and syntax highlighting; Space-to-preview/toggle and single-instance behavior (the Ctrl+Alt+Shift+F12 trigger in [docs/quick-look-trigger.md](docs/quick-look-trigger.md) reuses this window as-is: repeats stack, nothing re-targets). The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification; audible PipeWire output and real-time duration readouts likewise need a Wayland-session check.
+Office documents and syntax highlighting; Space-to-preview/toggle and single-instance behavior (the Ctrl+Alt+Shift+F12 trigger in [docs/quick-look-trigger.md](docs/quick-look-trigger.md) reuses this window as-is: repeats stack, nothing re-targets). The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification; audible PipeWire output and real-time duration readouts likewise need a Wayland-session check. Only ZIP archives are listed; TAR, 7z, and RAR stay unsupported.
 
-Peek reads file contents only to decode the selected file for its preview (image pixels, PDF first page, text bytes, media stream); it never enumerates directories. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
+Peek reads file contents only to decode the selected file for its preview (image pixels, PDF first page, text bytes, media stream, archive listing headers); it never enumerates directories. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
 
 ## Dependencies
 
@@ -164,7 +171,7 @@ Failures report a diagnostic on stderr and create no preview window. Existence/t
 
 ## Nautilus selection handoff (diagnostic fallback)
 
-See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installation and Omarchy acceptance tests. The Script belongs at `~/.local/share/nautilus/scripts/Peek` on the default desktop setup. It decodes only local `file:` URIs and uses the first item in Nautilus-provided order for multiple selections; directories show the directory placeholder, and image, PDF, Markdown, text, video, and audio files render through the same native preview window as the CLI. The keyboard trigger is user-local configuration documented in [docs/quick-look-trigger.md](docs/quick-look-trigger.md) (Ctrl+Alt+Shift+F12 forwarding to this Script; installed manually, never by the build). There is no Space-to-preview binding, daemon, single-instance behavior, selection cache, polling, clipboard, or desktop configuration change involved.
+See [docs/nautilus-script.md](docs/nautilus-script.md) for user-local installation and Omarchy acceptance tests. The Script belongs at `~/.local/share/nautilus/scripts/Peek` on the default desktop setup. It decodes only local `file:` URIs and uses the first item in Nautilus-provided order for multiple selections; directories show the directory placeholder, and image, PDF, Markdown, text, video, audio, and archive files render through the same native preview window as the CLI. The keyboard trigger is user-local configuration documented in [docs/quick-look-trigger.md](docs/quick-look-trigger.md) (Ctrl+Alt+Shift+F12 forwarding to this Script; installed manually, never by the build). There is no Space-to-preview binding, daemon, single-instance behavior, selection cache, polling, clipboard, or desktop configuration change involved.
 
 ## Development workflow
 
