@@ -4,6 +4,7 @@
 #include "image_provider.h"
 #include "markdown_preview.h"
 #include "markdown_provider.h"
+#include "pdf_zoom.h"
 #include "preview_request.h"
 #include "preview_util.h"
 #include "preview_window.h"
@@ -22,7 +23,10 @@
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSet>
+#include <QSignalSpy>
 #include <QSlider>
 #include <QStandardPaths>
 #include <QTableWidget>
@@ -32,6 +36,7 @@
 #include <QTimer>
 
 #include <array>
+#include <atomic>
 #include <climits>
 
 #ifdef PEEK_WITH_MULTIMEDIA
@@ -40,6 +45,7 @@
 #endif
 
 #ifdef PEEK_WITH_PDF
+#include "pdf_preview.h"
 #include "pdf_provider.h"
 #endif
 
@@ -150,6 +156,156 @@ QByteArray buildMinimalPdf()
            QByteArray("\n%%EOF\n");
     return pdf;
 }
+
+// Multi-page variant: N Helvetica pages with per-page MediaBox sizes so
+// navigation tests can distinguish pages by rendered size. Same self-
+// contained approach as buildMinimalPdf (no external producer). Poppler-only
+// tests use it, so it is compiled out of OFF-backend builds to avoid an
+// unused-function warning there.
+#ifdef PEEK_WITH_PDF
+QByteArray buildMultiPagePdf(int pageCount, const QList<QSize> &sizes = {})
+{
+    if (pageCount < 1) {
+        pageCount = 1;
+    }
+    QList<QByteArray> objects;
+    // Object 1: catalog; object 2: page tree with N kids. Page i uses objects
+    // (3 + 2*i) for the page dict and (4 + 2*i) for its content stream; the
+    // shared Helvetica font is the final object.
+    QString kids;
+    for (int i = 0; i < pageCount; ++i) {
+        kids += QStringLiteral("%1 0 R ").arg(3 + 2 * i);
+    }
+    objects.append(QByteArray("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"));
+    objects.append(QByteArray("2 0 obj\n<< /Type /Pages /Kids [") + kids.toLatin1() +
+                   QByteArray("] /Count ") + QByteArray::number(pageCount) +
+                   QByteArray(" >>\nendobj\n"));
+    const int fontObj = 3 + 2 * pageCount;
+    for (int i = 0; i < pageCount; ++i) {
+        const int pageObj = 3 + 2 * i;
+        const int contentObj = 4 + 2 * i;
+        QSize box(300, 300);
+        if (i < sizes.size() && !sizes.at(i).isEmpty()) {
+            box = sizes.at(i);
+        }
+        const QByteArray stream = QByteArray("BT /F1 24 Tf 72 720 Td (Page ") +
+                                  QByteArray::number(i + 1) + QByteArray(") Tj ET");
+        objects.append(QByteArray::number(pageObj) +
+                       QByteArray(" 0 obj\n<< /Type /Page /Parent 2 0 R "
+                                  "/MediaBox [0 0 ") +
+                       QByteArray::number(box.width()) + QByteArray(" ") +
+                       QByteArray::number(box.height()) + QByteArray("] /Contents ") +
+                       QByteArray::number(contentObj) +
+                       QByteArray(" 0 R /Resources << /Font << /F1 ") +
+                       QByteArray::number(fontObj) + QByteArray(" 0 R >> >> >>\nendobj\n"));
+        objects.append(QByteArray::number(contentObj) + QByteArray(" 0 obj\n<< /Length ") +
+                       QByteArray::number(stream.size()) + QByteArray(" >>\nstream\n") + stream +
+                       QByteArray("\nendstream\nendobj\n"));
+    }
+    objects.append(QByteArray::number(fontObj) +
+                   QByteArray(" 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont "
+                              "/Helvetica >>\nendobj\n"));
+    QByteArray pdf("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+    QVector<int> offsets;
+    for (const QByteArray &object : objects) {
+        offsets.append(pdf.size());
+        pdf += object;
+    }
+    const int xrefPos = pdf.size();
+    pdf += QByteArray("xref\n0 ") + QByteArray::number(objects.size() + 1) +
+           QByteArray("\n0000000000 65535 f \n");
+    for (const int offset : offsets) {
+        pdf += QStringLiteral("%1 00000 n \n").arg(offset, 10, 10, QLatin1Char('0')).toLatin1();
+    }
+    pdf += QByteArray("trailer\n<< /Size ") + QByteArray::number(objects.size() + 1) +
+           QByteArray(" /Root 1 0 R >>\nstartxref\n") + QByteArray::number(xrefPos) +
+           QByteArray("\n%%EOF\n");
+    return pdf;
+}
+
+// Password-protected variant: a Standard-security (V1/R2) Encrypt entry so
+// Poppler reports the document locked without a password. If a backend
+// refuses the file outright it still fails gracefully as corrupt; tests only
+// require the claimed-but-unreadable status, never a crash or a fallback.
+// Like buildMultiPagePdf, only needed with the Poppler backend.
+QByteArray buildLockedPdf()
+{
+    const QByteArray stream("BT /F1 24 Tf 72 720 Td (Locked) Tj ET");
+    const QList<QByteArray> objects = {
+        QByteArray("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"),
+        QByteArray("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"),
+        QByteArray("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] "
+                   "/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n"),
+        QByteArray("4 0 obj\n<< /Length ") + QByteArray::number(stream.size()) +
+            QByteArray(" >>\nstream\n") + stream + QByteArray("\nendstream\nendobj\n"),
+        QByteArray("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"),
+        QByteArray("6 0 obj\n<< /Filter /Standard /V 1 /R 2 "
+                   "/O (0123456789abcdef0123456789abcdef) "
+                   "/U (0123456789abcdef0123456789abcdef) /P -4 >>\nendobj\n"),
+    };
+    QByteArray pdf("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+    QVector<int> offsets;
+    for (const QByteArray &object : objects) {
+        offsets.append(pdf.size());
+        pdf += object;
+    }
+    const int xrefPos = pdf.size();
+    pdf += QByteArray("xref\n0 ") + QByteArray::number(objects.size() + 1) +
+           QByteArray("\n0000000000 65535 f \n");
+    for (const int offset : offsets) {
+        pdf += QStringLiteral("%1 00000 n \n").arg(offset, 10, 10, QLatin1Char('0')).toLatin1();
+    }
+    pdf += QByteArray("trailer\n<< /Size ") + QByteArray::number(objects.size() + 1) +
+           QByteArray(" /Root 1 0 R /Encrypt 6 0 R >>\nstartxref\n") + QByteArray::number(xrefPos) +
+           QByteArray("\n%%EOF\n");
+    return pdf;
+}
+
+// Expected on-screen pixmap for a PDF window, mirroring
+// PreviewWindow::pdfDisplayTarget(): fit modes fit the base into the
+// viewport, Manual scales that fit by the fit-relative zoom factor.
+QSize expectedPdfDisplay(PreviewWindow &window)
+{
+    auto *scroll = window.findChild<QScrollArea *>(QStringLiteral("pdfScrollArea"));
+    if (scroll == nullptr) {
+        return {};
+    }
+    const QSize base = window.originalImageSize();
+    const QSize viewport = scroll->viewport()->size();
+    if (base.isEmpty() || viewport.isEmpty()) {
+        return {};
+    }
+    if (window.pdfFitMode() == pdf_zoom::FitMode::Manual) {
+        const QSize fit = pdf_zoom::fittedDisplaySize(base, viewport, pdf_zoom::FitMode::FitPage);
+        return pdf_zoom::zoomedDisplaySize(fit, window.pdfZoomFactor());
+    }
+    return pdf_zoom::fittedDisplaySize(base, viewport, window.pdfFitMode());
+}
+
+// Settles a shown PDF window until its displayed pixmap matches the expected
+// target within ±2 px (layout and the viewport-resize refit are
+// asynchronous). Returns false on timeout: the regression signal for the
+// tiny-sliver first view.
+bool waitForPdfFitted(PreviewWindow &window, int timeoutMs = 5000)
+{
+    auto *label = window.findChild<QLabel *>(QStringLiteral("imageLabel"));
+    if (label == nullptr) {
+        return false;
+    }
+    const int steps = timeoutMs / 25;
+    for (int i = 0; i < steps; ++i) {
+        QCoreApplication::processEvents();
+        const QSize expected = expectedPdfDisplay(window);
+        const QSize actual = label->pixmap().size();
+        if (!expected.isEmpty() && qAbs(actual.width() - expected.width()) <= 2 &&
+            qAbs(actual.height() - expected.height()) <= 2) {
+            return true;
+        }
+        QTest::qWait(25);
+    }
+    return false;
+}
+#endif // PEEK_WITH_PDF
 
 QString inputPath(const QString &absolutePath, bool isRelative)
 {
@@ -2647,6 +2803,569 @@ class PreviewTests : public QObject
             QVERIFY(!window.isTextPreview());
         }
     }
+
+    void pdfPageCountAndInitialPage()
+    {
+        // Page-count detection uses the cheap document query (no rendering)
+        // and the window selects the first page initially.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("three.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMultiPagePdf(3);
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        const PdfDocumentInfo info = pdfDocumentInfo(path);
+        QVERIFY(info.error.isEmpty());
+        QCOMPARE(info.pageCount, 3);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isPdfPreview());
+        QVERIFY(window.isImagePreview());
+        QCOMPARE(window.pdfPageCount(), 3);
+        QCOMPARE(window.pdfCurrentPage(), 0);
+
+        auto *pageLabel = window.findChild<QLabel *>(QStringLiteral("pdfPageLabel"));
+        QVERIFY(pageLabel != nullptr);
+        QCOMPARE(pageLabel->text(), QStringLiteral("Page 1 of 3"));
+
+        // Disabled states at the first page: previous off, next on.
+        auto *prev = window.findChild<QPushButton *>(QStringLiteral("pdfPrevButton"));
+        auto *next = window.findChild<QPushButton *>(QStringLiteral("pdfNextButton"));
+        QVERIFY(prev != nullptr);
+        QVERIFY(next != nullptr);
+        QVERIFY(!prev->isEnabled());
+        QVERIFY(next->isEnabled());
+
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("page 1 of 3")));
+    }
+
+    void pdfPreviousNextAndBoundaries()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("nav.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        // Distinct page sizes so a stale render would be detectable.
+        const QByteArray pdf =
+            buildMultiPagePdf(3, {QSize(300, 300), QSize(400, 200), QSize(200, 400)});
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isPdfPreview());
+        window.show();
+        QCoreApplication::processEvents();
+
+        auto *prev = window.findChild<QPushButton *>(QStringLiteral("pdfPrevButton"));
+        auto *next = window.findChild<QPushButton *>(QStringLiteral("pdfNextButton"));
+        auto *pageLabel = window.findChild<QLabel *>(QStringLiteral("pdfPageLabel"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(prev != nullptr && next != nullptr && pageLabel != nullptr && status != nullptr);
+
+        // Next to page 2 (async render): wait for the indicator to catch up.
+        window.showNextPdfPage();
+        QCOMPARE(window.pdfCurrentPage(), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(pageLabel->text() == QStringLiteral("Page 2 of 3"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("page 2 of 3")) &&
+                                     !status->text().contains(QStringLiteral("loading")),
+                                 5000);
+        QVERIFY(prev->isEnabled());
+        QVERIFY(next->isEnabled());
+
+        // Next to the last page: next disables.
+        window.showNextPdfPage();
+        QCOMPARE(window.pdfCurrentPage(), 2);
+        QTRY_VERIFY_WITH_TIMEOUT(pageLabel->text() == QStringLiteral("Page 3 of 3"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!next->isEnabled(), 5000);
+        QVERIFY(prev->isEnabled());
+
+        // Past-the-end clamps instead of wrapping or crashing.
+        window.showNextPdfPage();
+        QCOMPARE(window.pdfCurrentPage(), 2);
+        window.goToPdfPage(99);
+        QCOMPARE(window.pdfCurrentPage(), 2);
+
+        // Back to the first page: previous disables.
+        window.showPreviousPdfPage();
+        window.showPreviousPdfPage();
+        QCOMPARE(window.pdfCurrentPage(), 0);
+        QTRY_VERIFY_WITH_TIMEOUT(pageLabel->text() == QStringLiteral("Page 1 of 3"), 5000);
+        QVERIFY(!prev->isEnabled());
+        QVERIFY(next->isEnabled());
+
+        // Before-the-start clamps.
+        window.showPreviousPdfPage();
+        QCOMPARE(window.pdfCurrentPage(), 0);
+        window.goToPdfPage(-5);
+        QCOMPARE(window.pdfCurrentPage(), 0);
+    }
+
+    void pdfZoomLimitsAndFit()
+    {
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("zoom.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMinimalPdf();
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isPdfPreview());
+        window.show();
+        QCoreApplication::processEvents();
+
+        auto *zoomLabel = window.findChild<QLabel *>(QStringLiteral("pdfZoomLabel"));
+        QVERIFY(zoomLabel != nullptr);
+        // Initial mode fits the page with clear feedback.
+        QCOMPARE(window.pdfFitMode(), pdf_zoom::FitMode::FitPage);
+        QCOMPARE(zoomLabel->text(), QStringLiteral("Fit page"));
+
+        // Zooming in switches to manual with percentage feedback.
+        window.zoomPdfIn();
+        QCOMPARE(window.pdfFitMode(), pdf_zoom::FitMode::Manual);
+        QVERIFY(window.pdfZoomFactor() > 1.0);
+        QVERIFY(zoomLabel->text().endsWith(QStringLiteral("%")));
+
+        // Repeated zoom-in clamps at the maximum.
+        for (int i = 0; i < 20; ++i) {
+            window.zoomPdfIn();
+        }
+        QCOMPARE(window.pdfZoomFactor(), pdf_zoom::kMaxZoom);
+
+        // Repeated zoom-out clamps at the minimum.
+        for (int i = 0; i < 40; ++i) {
+            window.zoomPdfOut();
+        }
+        QCOMPARE(window.pdfZoomFactor(), pdf_zoom::kMinZoom);
+
+        // Fit buttons restore their modes with feedback.
+        window.fitPdfWidth();
+        QCOMPARE(window.pdfFitMode(), pdf_zoom::FitMode::FitWidth);
+        QCOMPARE(zoomLabel->text(), QStringLiteral("Fit width"));
+        window.fitPdfPage();
+        QCOMPARE(window.pdfFitMode(), pdf_zoom::FitMode::FitPage);
+        QCOMPARE(zoomLabel->text(), QStringLiteral("Fit page"));
+    }
+
+    void pdfInvalidEmptyUnreadableHandling()
+    {
+        // Out-of-range pages and missing files fail gracefully, never crash.
+        const PdfPageResult negative = renderPdfPage(QStringLiteral("/nonexistent/missing.pdf"), 0);
+        QVERIFY(negative.image.isNull());
+        QVERIFY(!negative.error.isEmpty());
+
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+
+        // Valid single-page document: page 0 renders, page 1 is out of range.
+        const QString onePath = fixtures.filePath(QStringLiteral("one.pdf"));
+        QFile one(onePath);
+        QVERIFY(one.open(QIODevice::WriteOnly));
+        const QByteArray onePdf = buildMinimalPdf();
+        QVERIFY(one.write(onePdf) == onePdf.size());
+        one.close();
+        const PdfPageResult beyond = renderPdfPage(onePath, 1);
+        QVERIFY(beyond.image.isNull());
+        QVERIFY(beyond.error.contains(QStringLiteral("out of range")));
+        QCOMPARE(beyond.pageCount, 1);
+        const PdfPageResult alsoNegative = renderPdfPage(onePath, -1);
+        QVERIFY(alsoNegative.image.isNull());
+
+        // Magic-but-garbage stays claimed with the existing PDF message.
+        const QString corruptPath = fixtures.filePath(QStringLiteral("corrupt.pdf"));
+        QFile corrupt(corruptPath);
+        QVERIFY(corrupt.open(QIODevice::WriteOnly));
+        const QByteArray garbage("%PDF-1.4\nthis is not a valid page tree at all\n");
+        QVERIFY(corrupt.write(garbage) == garbage.size());
+        corrupt.close();
+        QCOMPARE(pdfProvider().supports(corruptPath), ProviderSupport::Yes);
+        const PdfDocumentInfo corruptInfo = pdfDocumentInfo(corruptPath);
+        QVERIFY(!corruptInfo.error.isEmpty());
+        const auto corruptResult = validatePreviewPath(corruptPath);
+        QVERIFY2(corruptResult.error.isEmpty(), qPrintable(corruptResult.error));
+        {
+            PreviewWindow window(corruptResult.request);
+            QVERIFY(!window.isPdfPreview());
+            QVERIFY(!window.isImagePreview());
+            auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+            QVERIFY(status != nullptr);
+            QVERIFY(status->text().contains(QStringLiteral("Could not load a PDF preview")));
+            QVERIFY(window.findChild<QPushButton *>(QStringLiteral("pdfNextButton")) == nullptr);
+        }
+
+        // Empty file: no magic, never claimed, generic fallback stands.
+        const QString emptyPath = fixtures.filePath(QStringLiteral("empty.pdf"));
+        QFile empty(emptyPath);
+        QVERIFY(empty.open(QIODevice::WriteOnly));
+        empty.close();
+        QCOMPARE(pdfProvider().supports(emptyPath), ProviderSupport::No);
+        const PdfDocumentInfo emptyInfo = pdfDocumentInfo(emptyPath);
+        QVERIFY(!emptyInfo.error.isEmpty());
+    }
+
+    void pdfRapidNavigationSafety()
+    {
+        // Rapid page changes must never display a stale page or crash: the
+        // generation ticket discards obsolete worker results.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("rapid.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMultiPagePdf(5);
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isPdfPreview());
+        window.show();
+        QCoreApplication::processEvents();
+
+        auto *pageLabel = window.findChild<QLabel *>(QStringLiteral("pdfPageLabel"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(pageLabel != nullptr && status != nullptr);
+
+        // Fires several requests without waiting: only the last may win.
+        window.goToPdfPage(1);
+        window.goToPdfPage(3);
+        window.goToPdfPage(2);
+        window.goToPdfPage(4);
+        QCOMPARE(window.pdfCurrentPage(), 4);
+        QTRY_VERIFY_WITH_TIMEOUT(pageLabel->text() == QStringLiteral("Page 5 of 5"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("page 5 of 5")) &&
+                                     !status->text().contains(QStringLiteral("loading")),
+                                 5000);
+
+        // And back the other way in one burst.
+        window.goToPdfPage(0);
+        window.goToPdfPage(2);
+        window.goToPdfPage(1);
+        QCOMPARE(window.pdfCurrentPage(), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(pageLabel->text() == QStringLiteral("Page 2 of 5"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("page 2 of 5")) &&
+                                     !status->text().contains(QStringLiteral("loading")),
+                                 5000);
+
+        // Closing mid-flight must not crash (worker results discarded).
+        window.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 2000);
+    }
+
+    void pdfDispatchAndControlsIntact()
+    {
+        // The interactive PDF preview preserves the existing surface: the
+        // shared image view plus status message, with compact controls added.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("surface.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMultiPagePdf(2);
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isPdfPreview());
+        QVERIFY(window.isImagePreview());
+        QVERIFY(!window.isTextPreview());
+        QVERIFY(!window.isMarkdownPreview());
+
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("imageLabel")) != nullptr);
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("statusLabel")) != nullptr);
+        QVERIFY(window.findChild<QWidget *>(QStringLiteral("pdfControls")) != nullptr);
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("pdfPrevButton")) != nullptr);
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("pdfNextButton")) != nullptr);
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("pdfPageLabel")) != nullptr);
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("pdfZoomInButton")) != nullptr);
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("pdfZoomOutButton")) != nullptr);
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("pdfFitPageButton")) != nullptr);
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("pdfFitWidthButton")) != nullptr);
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("pdfZoomLabel")) != nullptr);
+
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QCOMPARE(status->textFormat(), Qt::PlainText);
+        QVERIFY(status->text().contains(QStringLiteral("PDF document")));
+
+        // Other providers still leave PDFs alone and vice versa.
+        QCOMPARE(textProvider().supports(path), ProviderSupport::No);
+        QCOMPARE(imageProvider().supports(path), ProviderSupport::No);
+        QCOMPARE(archiveProvider().supports(path), ProviderSupport::No);
+    }
+
+    void pdfInitialViewIsFitted()
+    {
+        // Regression test for the tiny-sliver first view: after show() plus
+        // event settling, the displayed pixmap must equal the fitted target
+        // (no resize or control click required), for a tall and a small page.
+        const QList<QSize> pages = {QSize(200, 800), QSize(60, 60)};
+        for (const QSize &pageSize : pages) {
+            QTemporaryDir fixtures;
+            QVERIFY(fixtures.isValid());
+            const QString path = fixtures.filePath(QStringLiteral("fitted.pdf"));
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            const QByteArray pdf = buildMultiPagePdf(1, {pageSize});
+            QVERIFY(file.write(pdf) == pdf.size());
+            file.close();
+
+            const auto result = validatePreviewPath(path);
+            QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+            PreviewWindow window(result.request);
+            QVERIFY(window.isPdfPreview());
+            window.show();
+            QVERIFY2(waitForPdfFitted(window),
+                     qPrintable(QStringLiteral("initial view never fitted for %1x%2")
+                                    .arg(pageSize.width())
+                                    .arg(pageSize.height())));
+        }
+    }
+
+    void pdfZoomStepsTrackOnScreenSize()
+    {
+        // Every step stays relative to what is on screen: one zoom-in grows
+        // the longest side by ~25 %, one zoom-out returns to (almost) the
+        // fitted size, and the zoom-out/Fit/zoom-in sequence grows instead of
+        // shrinking ~3x.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("steps.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMultiPagePdf(1, {QSize(60, 60)});
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isPdfPreview());
+        window.show();
+        QVERIFY(waitForPdfFitted(window));
+
+        auto *label = window.findChild<QLabel *>(QStringLiteral("imageLabel"));
+        QVERIFY(label != nullptr);
+        const int fitted = qMax(label->pixmap().width(), label->pixmap().height());
+        QVERIFY(fitted > 0);
+
+        window.zoomPdfIn();
+        QCoreApplication::processEvents();
+        const int grown = qMax(label->pixmap().width(), label->pixmap().height());
+        const double up = static_cast<double>(grown) / static_cast<double>(fitted);
+        QVERIFY2(up >= 1.20 && up <= 1.30, qPrintable(QString::number(up)));
+
+        window.zoomPdfOut();
+        QCoreApplication::processEvents();
+        const int back = qMax(label->pixmap().width(), label->pixmap().height());
+        QVERIFY(qAbs(back - fitted) <= 2);
+
+        for (int i = 0; i < 10; ++i) {
+            window.zoomPdfOut();
+        }
+        window.fitPdfPage();
+        QCoreApplication::processEvents();
+        const int refitted = qMax(label->pixmap().width(), label->pixmap().height());
+        window.zoomPdfIn();
+        QCoreApplication::processEvents();
+        const int after = qMax(label->pixmap().width(), label->pixmap().height());
+        QVERIFY2(after > refitted,
+                 qPrintable(QStringLiteral("zoom-in shrank %1 to %2").arg(refitted).arg(after)));
+    }
+
+    void pdfFitWidthHasNoHorizontalScrollbar()
+    {
+        // Fit width must match the viewport width exactly (no permanent
+        // horizontal scrollbar from a scrollbar-induced viewport shrink) and
+        // stay stable across further event settling (no refit oscillation).
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("wide.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMultiPagePdf(1, {QSize(200, 800)});
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isPdfPreview());
+        window.show();
+        QVERIFY(waitForPdfFitted(window));
+
+        window.fitPdfWidth();
+        auto *scroll = window.findChild<QScrollArea *>(QStringLiteral("pdfScrollArea"));
+        auto *label = window.findChild<QLabel *>(QStringLiteral("imageLabel"));
+        QVERIFY(scroll != nullptr && label != nullptr);
+        bool matched = false;
+        for (int i = 0; i < 200; ++i) {
+            QCoreApplication::processEvents();
+            const int viewportWidth = scroll->viewport()->width();
+            const int labelWidth = label->pixmap().width();
+            if (viewportWidth > 0 && qAbs(labelWidth - viewportWidth) <= 2 &&
+                !scroll->horizontalScrollBar()->isVisible()) {
+                matched = true;
+                break;
+            }
+            QTest::qWait(25);
+        }
+        QVERIFY2(matched, "fit width never matched the viewport width");
+
+        const QSize settled = label->pixmap().size();
+        for (int i = 0; i < 10; ++i) {
+            QTest::qWait(25);
+            QCoreApplication::processEvents();
+        }
+        QCOMPARE(label->pixmap().size(), settled);
+    }
+
+    void pdfWorkerSkipsStaleTickets()
+    {
+        // The worker compares each queued task against the window's latest
+        // ticket before rasterizing: superseded pages cost no render and emit
+        // no completion. Called directly for determinism (no thread race).
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("ticket.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMinimalPdf();
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        PdfPageWorker worker;
+        QSignalSpy spy(&worker, &PdfPageWorker::done);
+        QVERIFY(spy.isValid());
+        std::atomic<quint64> latest{5};
+        worker.latestTicket = &latest;
+
+        worker.render(path, 0, 3);
+        QCOMPARE(spy.count(), 0);
+
+        worker.render(path, 0, 5);
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(1).toInt(), 0);
+        QVERIFY(!spy.at(0).at(2).value<QImage>().isNull());
+        QVERIFY(spy.at(0).at(3).toString().isEmpty());
+    }
+
+    void pdfEncryptedStaysGraceful()
+    {
+        // A password-protected PDF keeps the claim with the PDF status
+        // message: no view, no controls, no fallthrough, no crash.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("locked.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildLockedPdf();
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        QCOMPARE(pdfProvider().supports(path), ProviderSupport::Yes);
+        const PdfDocumentInfo info = pdfDocumentInfo(path);
+        QVERIFY(!info.error.isEmpty());
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isPdfPreview());
+        QVERIFY(!window.isImagePreview());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QVERIFY(status->text().contains(QStringLiteral("Could not load a PDF preview")));
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("pdfNextButton")) == nullptr);
+        QVERIFY(window.findChild<QWidget *>(QStringLiteral("pdfControls")) == nullptr);
+        window.show();
+        QCoreApplication::processEvents();
+        QVERIFY(window.isVisible());
+    }
+
+    void pdfUnreadableFallsThrough()
+    {
+#ifdef Q_OS_LINUX
+        // Without read permission even the magic check fails, so the file is
+        // never claimed: the generic fallback stands instead of a PDF error.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("secret.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMinimalPdf();
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+        QVERIFY(QFile::setPermissions(path, QFileDevice::Permissions()));
+        if (QFileInfo(path).isReadable()) {
+            QSKIP("Unreadable fixtures need a non-privileged user.");
+        }
+        QCOMPARE(pdfProvider().supports(path), ProviderSupport::No);
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(!window.isPdfPreview());
+        QVERIFY(!window.isImagePreview());
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+        QVERIFY(status != nullptr);
+        QCOMPARE(status->text(), QStringLiteral("No image preview is available for this file."));
+#else
+        QSKIP("Unreadable fixtures use Linux permission semantics.");
+#endif
+    }
+
+    void pdfKeyboardNavigationAndEscape()
+    {
+        // Plain arrow keys turn pages (Peek binds only Escape otherwise, and
+        // Hyprland reserves Super chords, so there is nothing to conflict
+        // with); Escape still dismisses the window.
+        QTemporaryDir fixtures;
+        QVERIFY(fixtures.isValid());
+        const QString path = fixtures.filePath(QStringLiteral("keys.pdf"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray pdf = buildMultiPagePdf(2);
+        QVERIFY(file.write(pdf) == pdf.size());
+        file.close();
+
+        const auto result = validatePreviewPath(path);
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        PreviewWindow window(result.request);
+        QVERIFY(window.isPdfPreview());
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&window, 3000));
+
+        auto *pageLabel = window.findChild<QLabel *>(QStringLiteral("pdfPageLabel"));
+        QVERIFY(pageLabel != nullptr);
+
+        QTest::keyClick(&window, Qt::Key_Right);
+        QCOMPARE(window.pdfCurrentPage(), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(pageLabel->text() == QStringLiteral("Page 2 of 2"), 5000);
+
+        QTest::keyClick(&window, Qt::Key_Left);
+        QCOMPARE(window.pdfCurrentPage(), 0);
+        QTRY_VERIFY_WITH_TIMEOUT(pageLabel->text() == QStringLiteral("Page 1 of 2"), 5000);
+
+        QTest::keyClick(&window, Qt::Key_Escape);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 2000);
+    }
 #endif
 
 #ifndef PEEK_WITH_PDF
@@ -2693,6 +3412,105 @@ class PreviewTests : public QObject
         const QSize fitted = PreviewWindow::fittedSize(QSize(3000, 2000), QSize(2048, 2048));
         QCOMPARE(fitted, QSize(2048, 1365));
         QVERIFY(qAbs(fitted.width() * 2 - fitted.height() * 3) <= 2);
+    }
+
+    void pdfZoomClampLimits()
+    {
+        // Sensible minimum/maximum with clear clamping; runs without Poppler
+        // so OFF builds cover the math too.
+        QCOMPARE(pdf_zoom::clampZoom(1.0), 1.0);
+        QCOMPARE(pdf_zoom::clampZoom(pdf_zoom::kMinZoom), pdf_zoom::kMinZoom);
+        QCOMPARE(pdf_zoom::clampZoom(pdf_zoom::kMaxZoom), pdf_zoom::kMaxZoom);
+        QCOMPARE(pdf_zoom::clampZoom(0.01), pdf_zoom::kMinZoom);
+        QCOMPARE(pdf_zoom::clampZoom(100.0), pdf_zoom::kMaxZoom);
+        QCOMPARE(pdf_zoom::clampZoom(0.0), 1.0);
+        QCOMPARE(pdf_zoom::clampZoom(-2.0), 1.0);
+    }
+
+    void pdfZoomInOutSteps()
+    {
+        QCOMPARE(pdf_zoom::zoomIn(1.0), 1.25);
+        QCOMPARE(pdf_zoom::zoomOut(1.0), 0.8);
+        // Steps clamp at the ends instead of drifting past them.
+        double zoom = 1.0;
+        for (int i = 0; i < 20; ++i) {
+            zoom = pdf_zoom::zoomIn(zoom);
+        }
+        QCOMPARE(zoom, pdf_zoom::kMaxZoom);
+        for (int i = 0; i < 40; ++i) {
+            zoom = pdf_zoom::zoomOut(zoom);
+        }
+        QCOMPARE(zoom, pdf_zoom::kMinZoom);
+        // Feedback strings stay explicit.
+        QCOMPARE(pdf_zoom::zoomLabel(pdf_zoom::FitMode::FitPage), QStringLiteral("Fit page"));
+        QCOMPARE(pdf_zoom::zoomLabel(pdf_zoom::FitMode::FitWidth), QStringLiteral("Fit width"));
+        QCOMPARE(pdf_zoom::zoomLabel(pdf_zoom::FitMode::Manual, 1.0), QStringLiteral("100%"));
+        QVERIFY(pdf_zoom::zoomLabel(pdf_zoom::FitMode::Manual, 1.25).endsWith(QStringLiteral("%")));
+    }
+
+    void pdfFitCalculations()
+    {
+        // Fit-page preserves aspect inside the available area.
+        QCOMPARE(pdf_zoom::fittedDisplaySize(QSize(1000, 500), QSize(500, 500),
+                                             pdf_zoom::FitMode::FitPage),
+                 QSize(500, 250));
+        QCOMPARE(pdf_zoom::fittedDisplaySize(QSize(400, 800), QSize(400, 400),
+                                             pdf_zoom::FitMode::FitPage),
+                 QSize(200, 400));
+        // Fit-width matches the available width and follows aspect (may
+        // exceed the available height; the scroll area pans).
+        QCOMPARE(pdf_zoom::fittedDisplaySize(QSize(400, 800), QSize(400, 400),
+                                             pdf_zoom::FitMode::FitWidth),
+                 QSize(400, 800));
+        QCOMPARE(pdf_zoom::fittedDisplaySize(QSize(1000, 500), QSize(500, 500),
+                                             pdf_zoom::FitMode::FitWidth),
+                 QSize(500, 250));
+        // Manual zoom ignores the available area with clamping.
+        QCOMPARE(pdf_zoom::fittedDisplaySize(QSize(400, 300), QSize(100, 100),
+                                             pdf_zoom::FitMode::Manual, 2.0),
+                 QSize(800, 600));
+        QCOMPARE(pdf_zoom::fittedDisplaySize(QSize(400, 300), QSize(100, 100),
+                                             pdf_zoom::FitMode::Manual, 100.0),
+                 QSize(1600, 1200));
+        // Empty inputs never crash.
+        QCOMPARE(pdf_zoom::fittedDisplaySize(QSize(), QSize(500, 500), pdf_zoom::FitMode::FitPage),
+                 QSize());
+        QCOMPARE(pdf_zoom::fittedDisplaySize(QSize(400, 300), QSize(), pdf_zoom::FitMode::FitPage),
+                 QSize(400, 300));
+        // Indicator text is 1-based with clamping.
+        QCOMPARE(pdf_zoom::pageLabel(0, 3), QStringLiteral("Page 1 of 3"));
+        QCOMPARE(pdf_zoom::pageLabel(2, 3), QStringLiteral("Page 3 of 3"));
+        QCOMPARE(pdf_zoom::pageLabel(-1, 3), QStringLiteral("Page 1 of 3"));
+        QCOMPARE(pdf_zoom::pageLabel(9, 3), QStringLiteral("Page 3 of 3"));
+        QCOMPARE(pdf_zoom::pageLabel(0, 0), QStringLiteral("No pages"));
+        // Fit-relative zoom helper: scales the fitted size, capped.
+        QCOMPARE(pdf_zoom::zoomedDisplaySize(QSize(161, 644), 1.25), QSize(201, 805));
+        QCOMPARE(pdf_zoom::zoomedDisplaySize(QSize(2048, 2048), 4.0), QSize(4096, 4096));
+        QCOMPARE(pdf_zoom::zoomedDisplaySize(QSize(), 2.0), QSize());
+        // Status helpers shared by every window update site.
+        QCOMPARE(pdf_zoom::statusText(0, 3, QSize(512, 2048)),
+                 QStringLiteral("PDF document — page 1 of 3 — 512 × 2048 px"));
+        QCOMPARE(pdf_zoom::loadingText(1, 3),
+                 QStringLiteral("PDF document — page 2 of 3 — loading…"));
+    }
+
+    void pdfDisplaySizeBound()
+    {
+        // Uncapped, a 4x manual zoom of a 2048 px base would allocate an
+        // 8192-px (~256 MiB ARGB32) display pixmap. The bound keeps the
+        // aspect while capping the longest side at kMaxDisplayPixels.
+        QCOMPARE(pdf_zoom::boundDisplaySize(QSize(8192, 8192)), QSize(4096, 4096));
+        QCOMPARE(pdf_zoom::boundDisplaySize(QSize(2048, 1024)), QSize(2048, 1024));
+        QCOMPARE(pdf_zoom::boundDisplaySize(QSize()), QSize());
+        QCOMPARE(pdf_zoom::fittedDisplaySize(QSize(2048, 2048), QSize(800, 600),
+                                             pdf_zoom::FitMode::Manual, 4.0),
+                 QSize(4096, 4096));
+        // A pathological narrow base in FitWidth is capped, aspect preserved.
+        const QSize wide = pdf_zoom::fittedDisplaySize(QSize(100, 2048), QSize(1024, 768),
+                                                       pdf_zoom::FitMode::FitWidth);
+        QCOMPARE(wide.height(), pdf_zoom::kMaxDisplayPixels);
+        QVERIFY(wide.width() > 0 && wide.width() < 1024);
+        QVERIFY(qAbs(wide.width() - 200) <= 5);
     }
 
     void largeImageDecodeBound()

@@ -14,7 +14,8 @@
 // This header and its implementation are only built into targets that
 // define PEEK_WITH_PDF; see CMakeLists.txt.
 ProviderSupport pdfProviderSupports(const QString &path);
-bool renderPdfPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *layout);
+bool renderPdfPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *layout,
+                      int *pageCountOut = nullptr);
 
 // Singleton provider entry used by the dispatch layer. Returned by reference
 // so the dispatch list holds a stable address without dynamic allocation.

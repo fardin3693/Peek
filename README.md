@@ -19,10 +19,12 @@ For files, the window dispatches by extension in a fixed order — PDF, then Mar
 - Large images are downscaled at decode time (longest side capped at 2048 px via the shared bounded decoder; size-unknown formats get a bounded request plus a post-decode shrink) and the initial window is capped at 1024×768.
 - Files no image plugin can read show `No image preview is available for this file.`; unreadable or corrupt images show `Could not load an image preview of this file (…).` instead of crashing.
 
-### PDF (first page only, requires the Poppler backend)
+### PDF (requires the Poppler backend)
 
 - A file counts as PDF only when it has a `.pdf` suffix (case-insensitive) **and** a `%PDF-` magic header; a bare extension never suffices.
-- Renders page 1 at up to 2048 px on the longest side (DPI capped at 300). The status line reads `PDF document — page 1 of N — W × H px`.
+- Renders pages on demand at up to 2048 px on the longest side (DPI capped at 300). Only the current page is rendered at open time; later pages render in a background thread with a `loading…` status while work is pending. The status line reads `PDF document — page X of N — W × H px`.
+- Compact previous/next controls with a `Page X of N` indicator (previous disabled on the first page, next on the last); plain `Left`/`Right`/`PageUp`/`PageDown` keys turn pages. The full list lives in [docs/keyboard-shortcuts.md](docs/keyboard-shortcuts.md).
+- Zoom in/out in 25% steps from 25% to 400% of the fitted size (100% fills the preview area) with a percentage readout, plus `Fit page` and `Fit width` modes; zooming rescales the cached page image and never reloads the document. Display pixmaps are capped at 4096 px on the longest side. A 3-entry page-image cache keeps recent pages; stale renders from rapid navigation are discarded before rasterizing.
 - Password-protected, corrupt, empty, and otherwise unreadable documents stay on the PDF status line (for example, `Could not load a PDF preview of this file (password-protected (password required)).`); they never fall through to the image preview.
 - Trust note: Poppler/FFmpeg are trusted decoder C/C++ code decoding untrusted input — parser CVEs keep arriving upstream. PDF preview is an opt-out risk surface: configure with `-DPEEK_WITH_PDF=OFF` to disable it, and track Poppler security releases.
 
@@ -67,7 +69,7 @@ For files, the window dispatches by extension in a fixed order — PDF, then Mar
 
 Office documents and syntax highlighting; Space-to-preview/toggle and single-instance behavior (the Ctrl+Alt+Shift+F12 trigger in [docs/quick-look-trigger.md](docs/quick-look-trigger.md) reuses this window as-is: repeats stack, nothing re-targets). The window is an ordinary decorated top-level widget, not yet a compositor-managed floating Quick Look window. Positioning and focus behavior on a real Wayland desktop still need manual verification; audible PipeWire output and real-time duration readouts likewise need a Wayland-session check. Only ZIP archives are listed; TAR, 7z, and RAR stay unsupported.
 
-Peek reads file contents only to decode the selected file for its preview (image pixels, PDF first page, text bytes, media stream, archive listing headers); it never enumerates directories. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
+Peek reads file contents only to decode the selected file for its preview (image pixels, PDF pages, text bytes, media stream, archive listing headers); it never enumerates directories. Python is not required by the native application; Python 3 (standard library only) is used by the optional Nautilus Script.
 
 ## Dependencies
 
@@ -85,7 +87,7 @@ Optional preview backends (auto-detected at configure time; absence disables the
 
 | Feature | Dependency | CMake switch | When disabled |
 | --- | --- | --- | --- |
-| PDF first-page preview | Poppler C++ (`poppler-cpp` via pkg-config) | `-DPEEK_WITH_PDF=OFF` | `pdf_preview.cpp` is not compiled and `.pdf` files fall through to the text/image/fallback path |
+| PDF preview | Poppler C++ (`poppler-cpp` via pkg-config) | `-DPEEK_WITH_PDF=OFF` | `pdf_preview.cpp` is not compiled and `.pdf` files fall through to the text/image/fallback path |
 | Video and audio preview | Qt Multimedia + MultimediaWidgets (FFmpeg backend at runtime) | `-DPEEK_WITH_MULTIMEDIA=OFF` | Audio/video extensions are still recognized but show `No audio/video preview is available for this file (Qt Multimedia is not installed).` |
 
 The switches force a feature off even when its dependency is present. Leaving them `ON` (the default) enables the feature only when the dependency is actually found. The `--help` description and the no-argument summary line list whichever categories are compiled in (verified: full build reports "image files, PDFs, videos, audio files, text files and directories").

@@ -25,44 +25,18 @@ constexpr double kMaxDpi = 300.0;
 // arithmetic runs.
 constexpr double kMaxPagePoints = 144000.0;
 
-} // namespace
-
-bool isPdfFile(const QString &path)
+PdfPageResult renderPageFromDocument(poppler::document *doc, int pageIndex, int pageCount)
 {
-    if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
-        return false;
-    }
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return false;
-    }
-    return file.read(5) == QByteArray("%PDF-", 5);
-}
-
-PdfFirstPageResult renderPdfFirstPage(const QString &path)
-{
-    PdfFirstPageResult result;
-
-    const std::string localPath = QFile::encodeName(path).toStdString();
-    std::unique_ptr<poppler::document> doc(poppler::document::load_from_file(localPath));
-    if (!doc) {
-        result.error = QStringLiteral("unreadable or corrupt");
-        return result;
-    }
-    if (doc->is_locked()) {
-        result.error = QStringLiteral("password-protected (password required)");
-        return result;
-    }
-    const int pageCount = doc->pages();
-    if (pageCount < 1) {
-        result.error = QStringLiteral("no pages");
-        return result;
-    }
+    PdfPageResult result;
     result.pageCount = pageCount;
-
-    std::unique_ptr<poppler::page> page(doc->create_page(0));
+    if (pageIndex < 0 || pageIndex >= pageCount) {
+        result.error = QStringLiteral("page out of range");
+        return result;
+    }
+    std::unique_ptr<poppler::page> page(doc->create_page(pageIndex));
     if (!page) {
-        result.error = QStringLiteral("first page is missing");
+        result.error = pageIndex == 0 ? QStringLiteral("first page is missing")
+                                      : QStringLiteral("page %1 is missing").arg(pageIndex + 1);
         return result;
     }
     const poppler::rectf box = page->page_rect(poppler::crop_box);
@@ -73,6 +47,7 @@ PdfFirstPageResult renderPdfFirstPage(const QString &path)
         result.error = QStringLiteral("invalid page size");
         return result;
     }
+    result.pageSizePoints = QSizeF(pageWidth, pageHeight);
 
     // Pick the resolution from the page aspect ratio so Poppler allocates at
     // most kMaxRenderPixels on the longest side. Verified again below, before
@@ -107,7 +82,9 @@ PdfFirstPageResult renderPdfFirstPage(const QString &path)
     renderer.set_image_format(poppler::image::format_argb32);
     const poppler::image rendered = renderer.render_page(page.get(), dpi, dpi);
     if (!rendered.is_valid() || rendered.format() != poppler::image::format_argb32) {
-        result.error = QStringLiteral("could not rasterize the first page");
+        result.error = pageIndex == 0
+                           ? QStringLiteral("could not rasterize the first page")
+                           : QStringLiteral("could not rasterize page %1").arg(pageIndex + 1);
         return result;
     }
     const int width = rendered.width();
@@ -124,7 +101,9 @@ PdfFirstPageResult renderPdfFirstPage(const QString &path)
     if (width < 1 || height < 1 || width > kMaxRenderPixels || height > kMaxRenderPixels ||
         data == nullptr || stride < minStride || bufferBytes <= 0 ||
         bufferBytes > kMaxBufferBytes) {
-        result.error = QStringLiteral("could not rasterize the first page");
+        result.error = pageIndex == 0
+                           ? QStringLiteral("could not rasterize the first page")
+                           : QStringLiteral("could not rasterize page %1").arg(pageIndex + 1);
         return result;
     }
 
@@ -134,8 +113,79 @@ PdfFirstPageResult renderPdfFirstPage(const QString &path)
                       QImage::Format_ARGB32);
     result.image = view.copy();
     if (result.image.isNull()) {
-        result.error = QStringLiteral("could not rasterize the first page");
+        result.error = pageIndex == 0
+                           ? QStringLiteral("could not rasterize the first page")
+                           : QStringLiteral("could not rasterize page %1").arg(pageIndex + 1);
         return result;
     }
+    return result;
+}
+
+} // namespace
+
+bool isPdfFile(const QString &path)
+{
+    if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+        return false;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    return file.read(5) == QByteArray("%PDF-", 5);
+}
+
+PdfDocumentInfo pdfDocumentInfo(const QString &path)
+{
+    PdfDocumentInfo info;
+    const std::string localPath = QFile::encodeName(path).toStdString();
+    std::unique_ptr<poppler::document> doc(poppler::document::load_from_file(localPath));
+    if (!doc) {
+        info.error = QStringLiteral("unreadable or corrupt");
+        return info;
+    }
+    if (doc->is_locked()) {
+        info.error = QStringLiteral("password-protected (password required)");
+        return info;
+    }
+    const int pageCount = doc->pages();
+    if (pageCount < 1) {
+        info.error = QStringLiteral("no pages");
+        return info;
+    }
+    info.pageCount = pageCount;
+    return info;
+}
+
+PdfPageResult renderPdfPage(const QString &path, int pageIndex)
+{
+    const std::string localPath = QFile::encodeName(path).toStdString();
+    std::unique_ptr<poppler::document> doc(poppler::document::load_from_file(localPath));
+    if (!doc) {
+        PdfPageResult result;
+        result.error = QStringLiteral("unreadable or corrupt");
+        return result;
+    }
+    if (doc->is_locked()) {
+        PdfPageResult result;
+        result.error = QStringLiteral("password-protected (password required)");
+        return result;
+    }
+    const int pageCount = doc->pages();
+    if (pageCount < 1) {
+        PdfPageResult result;
+        result.error = QStringLiteral("no pages");
+        return result;
+    }
+    return renderPageFromDocument(doc.get(), pageIndex, pageCount);
+}
+
+PdfFirstPageResult renderPdfFirstPage(const QString &path)
+{
+    PdfFirstPageResult result;
+    const PdfPageResult page = renderPdfPage(path, 0);
+    result.pageCount = page.pageCount;
+    result.image = page.image;
+    result.error = page.error;
     return result;
 }

@@ -40,7 +40,7 @@ if(PEEK_HAVE_MULTIMEDIA)
 endif()
 if(PEEK_HAVE_POPPLER)
     target_sources(peek_preview_tests PRIVATE ../src/pdf_preview.cpp ../src/pdf_preview.h
-        ../src/pdf_provider.cpp ../src/pdf_provider.h)
+        ../src/pdf_provider.cpp ../src/pdf_provider.h ../src/pdf_zoom.h)
     target_compile_definitions(peek_preview_tests PRIVATE PEEK_WITH_PDF)
     target_link_libraries(peek_preview_tests PRIVATE PkgConfig::POPPLER_CPP)
 endif()

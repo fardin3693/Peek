@@ -13,7 +13,8 @@ ProviderSupport pdfProviderSupports(const QString &path)
     return isPdfFile(path) ? ProviderSupport::Yes : ProviderSupport::No;
 }
 
-bool renderPdfPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *layout)
+bool renderPdfPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *layout,
+                      int *pageCountOut)
 {
     if (statusLabel == nullptr || layout == nullptr) {
         return false;
@@ -27,6 +28,9 @@ bool renderPdfPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *lay
         statusLabel->setText(
             QStringLiteral("Could not load a PDF preview of this file (%1).").arg(detail));
         return false;
+    }
+    if (pageCountOut != nullptr) {
+        *pageCountOut = pdf.pageCount;
     }
     const QPixmap original = QPixmap::fromImage(pdf.image);
     if (original.isNull()) {
@@ -58,6 +62,13 @@ bool renderPdfPreview(const QString &path, QLabel *statusLabel, QVBoxLayout *lay
 
 const PreviewProvider &pdfProvider()
 {
-    static const PreviewProvider provider = {"pdf", &pdfProviderSupports, &renderPdfPreview};
+    // The contract's render pointer is exactly three arguments; the lambda
+    // adapts the four-argument entry (with its default) without changing the
+    // contract type all providers share.
+    static const PreviewProvider provider = {
+        "pdf", &pdfProviderSupports,
+        +[](const QString &path, QLabel *statusLabel, QVBoxLayout *layout) {
+            return renderPdfPreview(path, statusLabel, layout);
+        }};
     return provider;
 }

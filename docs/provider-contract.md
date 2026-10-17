@@ -1,12 +1,10 @@
-# Preview-Provider Contract (proposal, not implemented)
+# Preview-Provider Contract (implemented)
 
-This document proposes the smallest practical provider interface for Peek's
-future modular preview architecture. It is design only: no interface is
-declared in source, no handler is refactored, and every behavior below is
-verified against the current fixed dispatch chain in
-`src/preview_window.cpp` (constructor, lines ~120–163) and the existing
-`src/*_preview` modules. Where the current code leaves a question open, the
-question is recorded instead of answered by guessing.
+This document describes the minimal provider interface Peek implements: text,
+Markdown, image, PDF, audio and archive providers follow it, with video still
+dispatched inline (see source of truth below). The original proposal text is
+preserved where it still matches the code; where the current code leaves a
+question open, the question is recorded instead of answered by guessing.
 
 Goals: keep the contract C++17 / Qt 6 with no new dependencies, preserve the
 existing preview behavior exactly, and avoid plugin loaders, runtime

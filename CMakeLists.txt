@@ -110,7 +110,7 @@ endif()
 
 if(PEEK_HAVE_POPPLER)
     target_sources(peek PRIVATE src/pdf_preview.cpp src/pdf_preview.h
-        src/pdf_provider.cpp src/pdf_provider.h)
+        src/pdf_provider.cpp src/pdf_provider.h src/pdf_zoom.h)
     target_compile_definitions(peek PRIVATE PEEK_WITH_PDF)
     target_link_libraries(peek PRIVATE PkgConfig::POPPLER_CPP)
 endif()
